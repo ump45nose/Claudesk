@@ -1,0 +1,101 @@
+services:
+  claude-desktop:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: local/claude-desktop-nas:official-linux
+    hostname: claude-desktop
+    ports:
+      - "${DESKTOP_BIND_ADDRESS:-0.0.0.0}:${WEB_PORT:-15820}:5800"
+      - "${BRIDGE_BIND_ADDRESS:-0.0.0.0}:${COWORK_WEB_PORT:-15821}:8080"
+    env_file:
+      - "${CLAUDE_ENV_FILE:-.env}"
+    environment:
+      TZ: "${TZ:-Asia/Shanghai}"
+      USER_ID: "${PUID:-1000}"
+      GROUP_ID: "${PGID:-1000}"
+      SUP_GROUP_IDS: "${KVM_GID:-104}"
+      DISPLAY_WIDTH: "${DISPLAY_WIDTH:-1920}"
+      DISPLAY_HEIGHT: "${DISPLAY_HEIGHT:-1080}"
+      WEB_AUDIO: "1"
+      SECURE_CONNECTION: "0"
+      WEB_AUTHENTICATION: "0"
+      VNC_LOCALHOST_ONLY: "1"
+      KEEP_APP_RUNNING: "1"
+      CLAUDE_UPDATE_ON_START: "${CLAUDE_UPDATE_ON_START:-1}"
+      CLAUDE_UPDATE_TIMEOUT_SECONDS: "${CLAUDE_UPDATE_TIMEOUT_SECONDS:-300}"
+      COWORK_BRIDGE_ENABLED: "${COWORK_BRIDGE_ENABLED:-1}"
+      COWORK_BRIDGE_INTERNAL_PORT: "${COWORK_BRIDGE_INTERNAL_PORT:-9222}"
+      CLAUDE_REMOTE_GATEWAY_SETTINGS: "${CLAUDE_REMOTE_GATEWAY_SETTINGS:-0}"
+      CLAUDE_REMOTE_DEVELOPER_ACTIONS: "${CLAUDE_REMOTE_DEVELOPER_ACTIONS:-0}"
+      CLAUDE_REMOTE_INFRASTRUCTURE_ACTIONS: "${CLAUDE_REMOTE_INFRASTRUCTURE_ACTIONS:-0}"
+      CLAUDE_REMOTE_CODE_ACTIONS: "${CLAUDE_REMOTE_CODE_ACTIONS:-0}"
+      CLAUDE_GATEWAY_BASE_URL: "${CLAUDE_GATEWAY_BASE_URL:?Set CLAUDE_GATEWAY_BASE_URL in .env}"
+      CLAUDE_GATEWAY_API_KEY: "${CLAUDE_GATEWAY_API_KEY:?Set CLAUDE_GATEWAY_API_KEY in .env}"
+      CLAUDE_GATEWAY_AUTH_SCHEME: "${CLAUDE_GATEWAY_AUTH_SCHEME:-bearer}"
+      CLAUDE_INFERENCE_MODELS_JSON: "${CLAUDE_INFERENCE_MODELS_JSON:?Set CLAUDE_INFERENCE_MODELS_JSON in .env}"
+    volumes:
+      - "${CLAUDE_CONFIG_DIR:-./data/config}:/config"
+      - "${CLAUDE_WORKSPACE_DIR:-./data/workspace}:/workspace"
+    devices:
+      - /dev/kvm:/dev/kvm
+      - /dev/vhost-vsock:/dev/vhost-vsock
+    group_add:
+      - "${KVM_GID:-104}"
+    security_opt:
+      - "seccomp=./security/claude-desktop.json"
+    shm_size: "2gb"
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - >-
+          pgrep -f '/usr/bin/claude-desktop|claude-desktop' >/dev/null
+          && curl -fsS --max-time 5 http://127.0.0.1:5800/ >/dev/null
+      interval: 30s
+      timeout: 8s
+      retries: 5
+      start_period: 90s
+    restart: unless-stopped
+
+  cowork-bridge:
+    build:
+      context: ./bridge
+      dockerfile: Dockerfile
+    image: local/claude-cowork-bridge:latest
+    network_mode: "service:claude-desktop"
+    depends_on:
+      claude-desktop:
+        condition: service_healthy
+        restart: true
+    environment:
+      BRIDGE_HOST: "0.0.0.0"
+      BRIDGE_PORT: "8080"
+      COWORK_INTERNAL_URL: "http://127.0.0.1:${COWORK_BRIDGE_INTERNAL_PORT:-9222}"
+      COWORK_BRIDGE_ALLOW_DESTRUCTIVE: "${COWORK_BRIDGE_ALLOW_DESTRUCTIVE:-0}"
+      CLAUDE_REMOTE_GATEWAY_SETTINGS: "${CLAUDE_REMOTE_GATEWAY_SETTINGS:-0}"
+      CLAUDE_REMOTE_DEVELOPER_ACTIONS: "${CLAUDE_REMOTE_DEVELOPER_ACTIONS:-0}"
+      CLAUDE_REMOTE_INFRASTRUCTURE_ACTIONS: "${CLAUDE_REMOTE_INFRASTRUCTURE_ACTIONS:-0}"
+      CLAUDE_REMOTE_CODE_ACTIONS: "${CLAUDE_REMOTE_CODE_ACTIONS:-0}"
+      COWORK_REMOTE_WORKSPACE_ROOT: "/workspace"
+      COWORK_INTERNAL_FAILURE_EXIT_THRESHOLD: "${COWORK_INTERNAL_FAILURE_EXIT_THRESHOLD:-3}"
+      CLAUDE_INFERENCE_MODELS_JSON: "${CLAUDE_INFERENCE_MODELS_JSON:?Set CLAUDE_INFERENCE_MODELS_JSON in .env}"
+    volumes:
+      - "${CLAUDE_WORKSPACE_DIR:-./data/workspace}:/workspace"
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    read_only: true
+    tmpfs:
+      - /tmp:size=64m,mode=1777
+    healthcheck:
+      test:
+        - CMD
+        - node
+        - -e
+        - "fetch('http://127.0.0.1:8080/api/health').then(r=>{if(!r.ok)process.exit(1)}).catch(()=>process.exit(1))"
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+    restart: unless-stopped

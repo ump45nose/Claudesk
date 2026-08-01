@@ -1,0 +1,9 @@
+.env
+.git
+.github
+.idea
+.vscode
+README.md
+scripts/
+data/
+*.log

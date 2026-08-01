@@ -1,0 +1,42 @@
+{
+  "name": "Claudesk",
+  "short_name": "Claudesk",
+  "description": "Remote Web and PWA bridge for the official Claude Desktop client",
+  "lang": "en",
+  "id": "/",
+  "start_url": "/",
+  "scope": "/",
+  "display": "standalone",
+  "prefer_related_applications": false,
+  "orientation": "any",
+  "background_color": "#f7f6f2",
+  "theme_color": "#f7f6f2",
+  "icons": [
+    {
+      "src": "/desktop-icon.png",
+      "sizes": "512x512",
+      "type": "image/png",
+      "purpose": "any"
+    },
+    {
+      "src": "/desktop-icon.png",
+      "sizes": "512x512",
+      "type": "image/png",
+      "purpose": "maskable"
+    }
+  ],
+  "shortcuts": [
+    {
+      "name": "New chat",
+      "short_name": "New chat",
+      "url": "/chat/new",
+      "icons": [{"src": "/desktop-icon.png", "sizes": "512x512", "type": "image/png"}]
+    },
+    {
+      "name": "New task",
+      "short_name": "New task",
+      "url": "/task/new",
+      "icons": [{"src": "/desktop-icon.png", "sizes": "512x512", "type": "image/png"}]
+    }
+  ]
+}

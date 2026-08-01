@@ -1,0 +1,98 @@
+.claude-remote-native-menu-layer {
+  position: fixed;
+  inset: 0;
+  z-index: 2147483000;
+  pointer-events: none;
+  font: inherit;
+  color: hsl(var(--text-100, 60 2.6% 7.6%));
+}
+
+.claude-remote-native-menu {
+  position: fixed;
+  width: max-content;
+  min-width: 230px;
+  max-width: min(620px, calc(100vw - 16px));
+  max-height: calc(100dvh - 16px);
+  overflow: auto;
+  padding: 7px;
+  border: 1px solid hsl(var(--border-300, 48 6% 86%));
+  border-radius: 12px;
+  background: hsl(var(--bg-000, 0 0% 100%));
+  box-shadow: 0 12px 36px rgb(0 0 0 / 18%), 0 2px 8px rgb(0 0 0 / 10%);
+  pointer-events: auto;
+  overscroll-behavior: contain;
+}
+
+.claude-remote-native-menu.depth-1,
+.claude-remote-native-menu.depth-2 {
+  min-width: min(520px, calc(100vw - 16px));
+}
+
+.claude-remote-native-menu__item {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 24px;
+  width: 100%;
+  min-height: 38px;
+  padding: 6px 14px;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  font-size: 15px;
+  line-height: 1.35;
+  text-align: left;
+  white-space: nowrap;
+  cursor: default;
+}
+
+.claude-remote-native-menu__item:hover:not(:disabled),
+.claude-remote-native-menu__item:focus-visible,
+.claude-remote-native-menu__item[aria-expanded="true"] {
+  outline: none;
+  background: hsl(var(--bg-200, 48 10% 92%));
+}
+
+.claude-remote-native-menu__item:disabled {
+  color: hsl(var(--text-500, 50 3% 55%));
+  opacity: 0.58;
+}
+
+.claude-remote-native-menu__label {
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.claude-remote-native-menu__trailing {
+  min-width: 34px;
+  color: hsl(var(--text-400, 50 3% 42%));
+  font-size: 14px;
+  text-align: right;
+}
+
+.claude-remote-native-menu__separator {
+  height: 1px;
+  margin: 6px 7px;
+  background: hsl(var(--border-300, 48 6% 86%));
+}
+
+@media (max-width: 679px) {
+  .claude-remote-native-menu {
+    min-width: min(230px, calc(100vw - 24px));
+    max-height: calc(100dvh - var(--claude-remote-safe-top, 0px) - 24px);
+  }
+
+  .claude-remote-native-menu.is-mobile {
+    right: auto;
+    width: min(520px, calc(100vw - 24px));
+    min-width: 0;
+    max-width: calc(100vw - 24px);
+  }
+
+  .claude-remote-native-menu__item {
+    min-height: 44px;
+    font-size: 16px;
+  }
+}

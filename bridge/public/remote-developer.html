@@ -1,0 +1,49 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+    <meta name="color-scheme" content="light dark">
+    <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; style-src 'self'; connect-src 'self'; img-src 'self' data:; base-uri 'none'; form-action 'self'; frame-ancestors 'self'">
+    <title>Claude Desktop Developer</title>
+    <link rel="stylesheet" href="/remote-developer.css">
+    <script src="/remote-developer.js" defer></script>
+  </head>
+  <body>
+    <header class="topbar">
+      <button id="back" type="button" class="icon-button" aria-label="Back">←</button>
+      <div>
+        <p class="eyebrow">Claude Desktop</p>
+        <h1 id="title">Developer</h1>
+      </div>
+      <span id="state" class="state" role="status">Loading…</span>
+    </header>
+
+    <main>
+      <section id="file-panel" class="panel" hidden>
+        <div class="notice">
+          This surface can contain API keys, MCP environment variables, commands, and local paths.
+          It is never cached. Use it only through your trusted Authelia-protected origin.
+        </div>
+        <div class="toolbar">
+          <button id="refresh" type="button" class="secondary">Refresh</button>
+          <button id="save" type="button" class="primary">Save</button>
+          <button id="reload-mcp" type="button" class="secondary">Reload MCP configuration</button>
+          <button id="download-text" type="button" class="secondary">Download</button>
+          <a class="button-link secondary" href="/remote-developer.html?view=artifacts">Trace and heap files</a>
+        </div>
+        <p id="file-meta" class="meta"></p>
+        <textarea id="editor" spellcheck="false" autocomplete="off" autocapitalize="off" aria-label="Developer file contents"></textarea>
+      </section>
+
+      <section id="artifact-panel" class="panel" hidden>
+        <div class="toolbar">
+          <button id="refresh-artifacts" type="button" class="secondary">Refresh</button>
+          <a class="button-link secondary" href="/">Back to Claude</a>
+        </div>
+        <p class="meta">Only official Desktop performance traces, memory traces, and main-process heap snapshots are listed.</p>
+        <div id="artifacts" class="artifact-list"></div>
+      </section>
+    </main>
+  </body>
+</html>

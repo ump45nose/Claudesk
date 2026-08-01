@@ -1,0 +1,6 @@
+{
+  "name": "claude-cowork-bridge-wrapper",
+  "private": true,
+  "version": "0.1.0",
+  "main": "main.cjs"
+}

@@ -1,0 +1,316 @@
+:root {
+  --claude-remote-safe-top: env(safe-area-inset-top, 0px);
+  --claude-remote-safe-right: env(safe-area-inset-right, 0px);
+  --claude-remote-safe-bottom: env(safe-area-inset-bottom, 0px);
+  --claude-remote-safe-left: env(safe-area-inset-left, 0px);
+}
+
+html,
+body,
+#root {
+  min-height: 100dvh;
+}
+
+/* Reuse the official Desktop renderer unchanged. These layout overrides are
+ * gated by a class that the preload adds only for a mobile device, so mobile
+ * browser tabs and PWAs share them while PC windows keep the official layout. */
+@media (max-width: 900px), (hover: none) and (pointer: coarse) {
+  html.claude-remote-mobile,
+  html.claude-remote-mobile body {
+    overflow-x: hidden;
+    text-size-adjust: 100%;
+    -webkit-text-size-adjust: 100%;
+  }
+
+  html.claude-remote-mobile h1.font-claude-response-title {
+    font-size: clamp(1.75rem, 7.5vw, 2.15rem) !important;
+    line-height: 1.12 !important;
+    text-wrap: balance;
+  }
+
+  html.claude-remote-mobile h1.font-display {
+    margin-left: 0 !important;
+    padding-inline: 0.5rem;
+    font-size: clamp(1.7rem, 7vw, 2.1rem) !important;
+    line-height: 1.18 !important;
+  }
+
+  html.claude-remote-mobile div.flex.items-start:has(> h1.font-claude-response-title)
+    > :first-child:not(h1) {
+    display: none !important;
+  }
+
+  html.claude-remote-mobile div.flex.items-start:has(> h1.font-claude-response-title) {
+    min-width: 0 !important;
+    padding-inline: 6px !important;
+  }
+
+  html.claude-remote-mobile div.flex.items-start > h1.font-claude-response-title {
+    min-width: 0 !important;
+    max-width: 100% !important;
+  }
+
+  html.claude-remote-mobile .epitaxy-user-turn,
+  html.claude-remote-mobile .\!font-user-message,
+  html.claude-remote-mobile p.font-claude-response-body {
+    font-size: 0.875rem !important;
+    line-height: 1.45 !important;
+    overflow-wrap: anywhere;
+    word-break: normal;
+    hyphens: none;
+  }
+
+  html.claude-remote-mobile .epitaxy-user-turn {
+    max-width: min(92%, calc(100vw - 3rem)) !important;
+    gap: 0.25rem !important;
+    margin-block: 0.125rem !important;
+  }
+
+  html.claude-remote-mobile .font-claude-response {
+    line-height: 1.45 !important;
+  }
+
+  html.claude-remote-mobile :is(.standard-markdown, .progressive-markdown)
+    > :is(p, blockquote, ul, ol, pre) {
+    margin-top: 0.25rem !important;
+    margin-bottom: 0.25rem !important;
+  }
+
+  html.claude-remote-mobile :is(.standard-markdown, .progressive-markdown)
+    > :is(h1, h2, h3, h4, h5, h6) {
+    margin-top: 0.55rem !important;
+    margin-bottom: 0.2rem !important;
+  }
+
+  html.claude-remote-mobile :is(.standard-markdown, .progressive-markdown)
+    > :first-child {
+    margin-top: 0 !important;
+  }
+
+  html.claude-remote-mobile :is(.standard-markdown, .progressive-markdown)
+    > :last-child {
+    margin-bottom: 0 !important;
+  }
+
+  html.claude-remote-mobile :is(.standard-markdown, .progressive-markdown)
+    :is(p, blockquote, ul, ol, h1, h2, h3, h4, h5, h6) {
+    padding-right: 0 !important;
+    padding-left: 0 !important;
+  }
+
+  /* Official Chat message rows use the g4/g6 and p6 design tokens. Tighten
+   * only those rows inside the official epitaxy transcript on mobile. */
+  html.claude-remote-mobile .epitaxy-root .gap-g4 {
+    gap: 3px !important;
+  }
+
+  html.claude-remote-mobile .epitaxy-root .gap-g6 {
+    gap: 5px !important;
+  }
+
+  html.claude-remote-mobile .epitaxy-root .py-p6 {
+    padding-top: 5px !important;
+    padding-bottom: 5px !important;
+  }
+
+  html.claude-remote-mobile .font-claude-response-small-bold,
+  html.claude-remote-mobile .text-sm {
+    font-size: 0.875rem !important;
+    line-height: 1.45 !important;
+  }
+
+  html.claude-remote-mobile textarea,
+  html.claude-remote-mobile input,
+  html.claude-remote-mobile [contenteditable="true"] {
+    font-size: 0.875rem !important;
+    line-height: 1.45 !important;
+  }
+
+  html.claude-remote-mobile pre,
+  html.claude-remote-mobile code {
+    font-size: 0.875rem;
+    overflow-wrap: anywhere;
+  }
+
+  html.claude-remote-mobile [data-testid="chat-header"] {
+    min-height: 2.75rem !important;
+    height: 2.75rem !important;
+    padding-inline: 0.625rem !important;
+  }
+
+  html.claude-remote-mobile [data-testid="chat-header"] .font-base-bold {
+    font-size: 0.875rem !important;
+  }
+
+  /* The official ion renderer does not expose data-chat-input-container.
+   * Anchor the mobile composer on its real editor structure instead: the
+   * ProseMirror editor lives below a direct .relative.font-large child. */
+  html.claude-remote-mobile [class~="relative"][class~="font-large"]:has(.ProseMirror) {
+    width: 100% !important;
+    max-width: 100% !important;
+    min-height: 0 !important;
+    margin: 0 !important;
+    padding: 1px 4px 0 !important;
+    overflow-x: hidden !important;
+    font-size: 0.875rem !important;
+    line-height: 1.35 !important;
+  }
+
+  html.claude-remote-mobile [class~="relative"][class~="font-large"] .ProseMirror {
+    width: 100% !important;
+    max-width: 100% !important;
+    min-height: 1.125rem !important;
+    max-height: 4.5rem !important;
+    padding-top: 0 !important;
+    padding-bottom: 0 !important;
+    overflow-x: hidden !important;
+    overflow-wrap: anywhere !important;
+    word-break: break-word !important;
+    white-space: pre-wrap !important;
+    scrollbar-width: none !important;
+    font-size: 0.875rem !important;
+    line-height: 1.35 !important;
+  }
+
+  html.claude-remote-mobile [class~="relative"][class~="font-large"]
+    .ProseMirror::-webkit-scrollbar:horizontal {
+    height: 0 !important;
+  }
+
+  /* The Code composer also renders a positioned placeholder layer. Its
+   * official desktop truncate rule is single-line and produces a horizontal
+   * scroller on a narrow phone, so wrap only that editor-local overlay. */
+  html.claude-remote-mobile [class~="relative"][class~="font-large"]:has(> .ProseMirror)
+    > [class~="absolute"][class~="inset-0"] {
+    max-width: 100% !important;
+    overflow: hidden !important;
+    overflow-wrap: anywhere !important;
+    text-overflow: clip !important;
+    white-space: normal !important;
+  }
+
+  html.claude-remote-mobile [class~="relative"][class~="font-large"]:has(> .ProseMirror)
+    > [class~="absolute"][class~="inset-0"] :is(span, p) {
+    max-width: 100% !important;
+    overflow-wrap: anywhere !important;
+    text-overflow: clip !important;
+    white-space: normal !important;
+  }
+
+  html.claude-remote-mobile [class~="relative"][class~="font-large"]
+    .ProseMirror.is-editor-empty::before {
+    font-size: inherit !important;
+    line-height: inherit !important;
+  }
+
+  /* This is the official composer layout wrapper. Keep the control row close
+   * to the editor and to the lower border, matching Claude's mobile client. */
+  html.claude-remote-mobile :has(> [class~="relative"][class~="font-large"] .ProseMirror) {
+    min-height: 0 !important;
+    gap: 0 !important;
+    margin: 2px 4px !important;
+    padding-top: 1px !important;
+    padding-bottom: 0 !important;
+  }
+
+  html.claude-remote-mobile :has(> [class~="relative"][class~="font-large"] .ProseMirror)
+    > [class~="relative"][class~="font-large"] ~ * {
+    margin-top: 0 !important;
+    margin-bottom: 0 !important;
+    padding-top: 0 !important;
+    padding-bottom: 0 !important;
+    transform: translateY(2px);
+  }
+
+  /* Current ion-dist no longer emits .epitaxy-composer-width. Anchor the
+   * complete card on its real relative/z-[1] wrapper instead. */
+  html.claude-remote-mobile [class~="relative"][class~="z-[1]"]:has(.ProseMirror) {
+    min-height: 0 !important;
+    border-radius: 18px !important;
+    translate: 0 -3px !important;
+  }
+
+  html.claude-remote-mobile :has(> [class~="relative"][class~="font-large"] .ProseMirror)
+    button {
+    min-height: 1.75rem !important;
+    font-size: 0.75rem !important;
+  }
+
+  /* Chat/Cowork icon-only controls carry the official aspect-square marker.
+   * Lock both axes in absolute CSS pixels: Android text/display scaling can
+   * otherwise stretch the token-based height while the aspect-ratio fallback
+   * is defeated by the button's min-height. Code uses a different composer
+   * and does not live below this z-[1] official Chat/Cowork card. */
+  html.claude-remote-mobile [class~="z-[1]"]:has(.ProseMirror)
+    button[class~="aspect-square"] {
+    display: inline-grid !important;
+    width: 32px !important;
+    min-width: 32px !important;
+    max-width: 32px !important;
+    height: 32px !important;
+    min-height: 32px !important;
+    max-height: 32px !important;
+    flex: 0 0 32px !important;
+    align-self: center !important;
+    place-items: center !important;
+    box-sizing: border-box !important;
+    padding: 0 !important;
+    line-height: 1 !important;
+    aspect-ratio: 1 / 1 !important;
+  }
+
+  /* The official control is centered by default and can cover the transcript
+   * on a narrow screen. Keep its official shape but dock it to the right. */
+  html.claude-remote-mobile [class~="relative"][class~="z-[1]"]:has(.ProseMirror)
+    > button.absolute[aria-hidden] {
+    right: 8px !important;
+    left: auto !important;
+    transform: none !important;
+  }
+
+  html.claude-remote-mobile [data-disclaimer] {
+    display: none !important;
+  }
+}
+
+#claude-remote-setup-back {
+  display: grid;
+  width: 30px;
+  height: 30px;
+  flex: 0 0 30px;
+  place-items: center;
+  padding: 0;
+  border: 0;
+  border-radius: 7px;
+  background: transparent;
+  color: hsl(var(--text-000, 60 2.6% 7.6%));
+  font: inherit;
+  font-size: 21px;
+  line-height: 1;
+  cursor: pointer;
+}
+
+#claude-remote-setup-back:hover,
+#claude-remote-setup-back:focus-visible {
+  outline: none;
+  background: hsl(var(--bg-200, 48 10% 92%));
+}
+
+.claude-remote-relaunch-icon > :not(svg) {
+  position: relative;
+  left: -14px;
+  top: -9px;
+}
+
+@media (display-mode: standalone) {
+  html.claude-remote-mobile body {
+    padding-top: var(--claude-remote-safe-top);
+    padding-right: var(--claude-remote-safe-right);
+    padding-bottom: var(--claude-remote-safe-bottom);
+    padding-left: var(--claude-remote-safe-left);
+  }
+
+  html.claude-remote-mobile #root {
+    min-height: calc(100dvh - var(--claude-remote-safe-top) - var(--claude-remote-safe-bottom));
+  }
+}
