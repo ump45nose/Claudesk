@@ -265,5 +265,9 @@ jq -e . security/claude-desktop.json bridge/public/manifest.webmanifest
 - [jlesage/docker-baseimage-gui](https://github.com/jlesage/docker-baseimage-gui) — 浏览器桌面容器基础镜像
 - [virtio-fs/virtiofsd](https://gitlab.com/virtio-fs/virtiofsd) — Cowork VM 文件共享
 - [moby/profiles](https://github.com/moby/profiles) — seccomp 基础策略
+  
+## 社区
+
+本项目在 [LINUX DO](https://linux.do/) 社区进行交流与发布，感谢社区提供的技术讨论环境。
 
 Claude、Claude Desktop 及相关标识是 Anthropic 的商标。本项目仅提供互操作与自托管部署代码。
