@@ -70,6 +70,7 @@ const allowedMethods = new Map([
     "getTranscript",
     "searchSessions",
     "respondToToolPermission",
+    "rewind",
     "sendMessage",
     "setFocusedSession",
     "setEffort",
@@ -1491,6 +1492,9 @@ async function handleApi(request, response, url) {
         && surfaces?.ClaudeVM?.includes("getRunningStatus")
         && surfaces?.ClaudeVM?.includes("startVM")
       );
+      const chatActionsReady = Boolean(
+        surfaces?.LocalAgentModeSessions?.includes("rewind")
+      );
       sendJson(response, 200, {
         ok: true,
         transport: "official-renderer-ipc",
@@ -1499,9 +1503,11 @@ async function handleApi(request, response, url) {
           surfaces?.LocalAgentModeSessions?.includes("getAll")
           && runtimeControlReady
         ),
+        chatActionsReady,
         chatReady: Boolean(
           surfaces?.LocalAgentModeSessions?.includes("start")
           && surfaces?.LocalAgentModeSessions?.includes("sendMessage")
+          && chatActionsReady
           && runtimeControlReady
         ),
         configuredModels,
@@ -1686,6 +1692,7 @@ async function serveOfficialAsset(response, pathname) {
   if (!upstream.ok) throw new ApiError(upstream.status, "official ion-dist asset not found");
   let body = Buffer.from(await upstream.arrayBuffer());
   let patchedGatewaySetup = false;
+  let patchedChatActions = false;
   if (
     gatewaySettingsEnabled
     && pathname.endsWith(".js")
@@ -1702,8 +1709,63 @@ async function serveOfficialAsset(response, pathname) {
     ), "utf8");
     patchedGatewaySetup = true;
   }
+  if (pathname.endsWith(".js")) {
+    const source = body.toString("utf8");
+    const retryGuard = 'function xF(){throw new Error("Cannot retry")}';
+    const retryTarget = "onRetry:xF,changeDisplayedConversationPath:yF";
+    const editTarget = 'Ee=Mt("cowork_edit_message_button")';
+    const messageActionsImport = 'from"./shared-10-DEXHYEQf.js"';
+    const messageActionsTarget = "z=P&&!p&&m&&u&&c&&!e.sendFailed&&!D&&(w?C&&i&&!_:!!e.parent_message_uuid)";
+    const retryReplacement = 'onRetry:"chat"===F.sessionType?(e,t)=>"human_message_hover"===e||"assistant_message_footer"===e?zs(st.find(e=>e.uuid===t)):$s(e):xF,changeDisplayedConversationPath:yF';
+    const hasChatActionsBundle = source.includes(retryGuard)
+      || source.includes(retryTarget)
+      || source.includes(editTarget);
+    if (hasChatActionsBundle) {
+      for (const [label, marker] of [
+        ["retry guard", retryGuard],
+        ["retry callback", retryTarget],
+        ["edit feature gate", editTarget],
+        ["message actions import", messageActionsImport],
+      ]) {
+        const first = source.indexOf(marker);
+        if (first < 0 || source.indexOf(marker, first + marker.length) >= 0) {
+          throw new ApiError(
+            502,
+            `official Chat ${label} changed; refusing an incomplete compatibility patch`,
+          );
+        }
+      }
+      body = Buffer.from(
+        source
+          .replace(retryTarget, retryReplacement)
+          .replace(editTarget, 'Ee="chat"===F.sessionType')
+          .replace(
+            messageActionsImport,
+            'from"./shared-10-DEXHYEQf.js?claudesk-chat-actions=20260802-3"',
+          ),
+        "utf8",
+      );
+      patchedChatActions = true;
+    } else if (source.includes(messageActionsTarget)) {
+      const first = source.indexOf(messageActionsTarget);
+      if (source.indexOf(messageActionsTarget, first + messageActionsTarget.length) >= 0) {
+        throw new ApiError(
+          502,
+          "official Chat message edit condition changed; refusing an ambiguous compatibility patch",
+        );
+      }
+      body = Buffer.from(
+        source.replace(
+          messageActionsTarget,
+          "z=P&&!p&&m&&u&&c&&!e.sendFailed&&!D&&(w?(!C||i)&&!_:!!e.parent_message_uuid)",
+        ),
+        "utf8",
+      );
+      patchedChatActions = true;
+    }
+  }
   response.writeHead(200, {
-    "Cache-Control": patchedGatewaySetup
+    "Cache-Control": patchedGatewaySetup || patchedChatActions
       ? "no-store"
       : pathname === "/frame-shell.html"
       ? "no-store"
@@ -1772,26 +1834,36 @@ async function serveOfficialIndex(response) {
     transport: "official-ion-dist-remote-ipc",
   };
   const bootstrapInjection = [
-    '<link rel="manifest" href="/manifest.webmanifest">',
+    '<link rel="manifest" href="/manifest.webmanifest?v=20260802-2">',
     '<meta name="theme-color" content="#f7f6f2">',
     `<script>globalThis.__CLAUDE_REMOTE_BOOTSTRAP__=${htmlSafeJson(config)}</script>`,
-    '<script src="/remote-main-menu.js"></script>',
-    '<script src="/remote-preload.js"></script>',
+    '<script src="/remote-main-menu.js?v=20260801-4"></script>',
+    '<script src="/remote-preload.js?v=20260802-18"></script>',
   ].join("");
   // The official entry lists its CSS after the module script. Put our narrow
   // remote overrides at the very end of <head>, otherwise the official button
   // sizing rules win in the mobile composer.
   const overrideStyles = [
-    '<link rel="stylesheet" href="/remote-shell.css">',
-    '<link rel="stylesheet" href="/remote-main-menu.css">',
+    '<link rel="stylesheet" href="/remote-shell.css?v=20260802-9">',
+    '<link rel="stylesheet" href="/remote-main-menu.css?v=20260801-2">',
   ].join("");
   let html = await upstream.text();
   html = html
     .replace('<link rel="manifest" href="/manifest.json">', "")
     .replace('<script type="module"', `${bootstrapInjection}<script type="module"`)
+    .replace(
+      /(<script type="module"[^>]*\bsrc="[^"]+\.js)(")/,
+      "$1?claudesk-chat-actions=20260802-3$2",
+    )
     .replace("</head>", `${overrideStyles}</head>`);
   if (!html.includes("__CLAUDE_REMOTE_BOOTSTRAP__")) {
     throw new ApiError(502, "official ion-dist entry format changed; refusing an unshimmed page");
+  }
+  if (!html.includes("?claudesk-chat-actions=20260802-3")) {
+    throw new ApiError(
+      502,
+      "official ion-dist module entry changed; refusing an unpatched Chat entry",
+    );
   }
   const body = Buffer.from(html, "utf8");
   response.writeHead(200, {

@@ -55,6 +55,7 @@ const allowedMethods = new Map([
     "getTranscript",
     "searchSessions",
     "respondToToolPermission",
+    "rewind",
     "sendMessage",
     "setFocusedSession",
     "setEffort",
