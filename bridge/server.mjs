@@ -21,6 +21,18 @@ const internalFailureExitThreshold = Number(
   process.env.COWORK_INTERNAL_FAILURE_EXIT_THRESHOLD || 3,
 );
 const publicDir = new URL("./public/", import.meta.url).pathname;
+const undefinedSentinelKey = "__claudeRemoteUndefinedV1";
+
+function encodeIpcValue(value) {
+  if (value === undefined) return { [undefinedSentinelKey]: true };
+  if (Array.isArray(value)) return value.map(encodeIpcValue);
+  if (value && typeof value === "object") {
+    return Object.fromEntries(
+      Object.entries(value).map(([key, item]) => [key, encodeIpcValue(item)]),
+    );
+  }
+  return value;
+}
 
 const configuredModels = (() => {
   try {
@@ -556,9 +568,12 @@ class DesktopInternalClient {
   }
 
   async invoke(surface, method, args, argsEncoding) {
+    const serializedArgs = argsEncoding === "json-undefined-v1"
+      ? encodeIpcValue(args)
+      : args;
     const body = await this.request("/invoke", {
       method: "POST",
-      body: JSON.stringify({ surface, method, args, argsEncoding }),
+      body: JSON.stringify({ surface, method, args: serializedArgs, argsEncoding }),
     });
     return body.value;
   }
@@ -1248,17 +1263,16 @@ async function requireSessionKind(sessionId, kind) {
 
 async function sendSessionMessage(sessionId, message) {
   const messageUuid = randomUUID();
-  // The optional fileAttachments/contentBlocks arguments must be omitted when
-  // they are absent. Passing [] makes Claude Desktop select its structured
-  // content branch, which persists an empty user message instead of `message`.
+  // Claude Desktop validates absent attachment arguments as undefined. Preserve
+  // that value across JSON instead of converting it to null or an empty array.
   const value = await desktop.invoke("LocalAgentModeSessions", "sendMessage", [
     sessionId,
     message,
-    [],
-    [],
+    undefined,
+    undefined,
     messageUuid,
-    [],
-  ]);
+    undefined,
+  ], "json-undefined-v1");
   return { value, messageUuid };
 }
 

@@ -278,15 +278,19 @@ if [ "$remote_gateway_settings" = "1" ]; then
             known_marketplaces_complete=0
             marketplace_session_root="$user_data_dir/local-agent-mode-sessions"
             if [ -d "$marketplace_session_root" ]; then
-                for known_marketplaces in $(find "$marketplace_session_root" \
-                    -type f -name known_marketplaces.json 2>/dev/null); do
-                    if jq -e --argjson expected "$configured_marketplace_count" \
-                        'type == "object" and length >= $expected' \
-                        "$known_marketplaces" >/dev/null; then
-                        known_marketplaces_complete=1
-                        break
-                    fi
-                done
+                # Read one path per line so spaces in persistent session paths
+                # are preserved instead of being split by command substitution.
+                if find "$marketplace_session_root" \
+                    -type f -name known_marketplaces.json -print 2>/dev/null |
+                    while IFS= read -r known_marketplaces; do
+                        if jq -e --argjson expected "$configured_marketplace_count" \
+                            'type == "object" and length >= $expected' \
+                            "$known_marketplaces" >/dev/null; then
+                            printf '%s\n' "$known_marketplaces"
+                        fi
+                    done | grep -q .; then
+                    known_marketplaces_complete=1
+                fi
             fi
             if [ "$known_marketplaces_complete" -eq 1 ]; then
                 marketplace_tmp="$(mktemp "$config_library/.marketplaces.XXXXXX")"
@@ -312,3 +316,4 @@ install -o root -g "${GROUP_ID:-1000}" -m 0440 \
     /etc/claude-desktop/managed-settings.json
 
 printf '[claude-config] managed 3P Gateway configuration installed; model discovery disabled\n'
+
