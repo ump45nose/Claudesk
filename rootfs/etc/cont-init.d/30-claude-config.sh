@@ -281,7 +281,7 @@ if [ "$remote_gateway_settings" = "1" ]; then
                 # Read one path per line so spaces in persistent session paths
                 # are preserved instead of being split by command substitution.
                 if find "$marketplace_session_root" \
-                    -type f -name known_marketplaces.json 2>/dev/null -print |
+                    -type f -name known_marketplaces.json -print 2>/dev/null |
                     while IFS= read -r known_marketplaces; do
                         if jq -e --argjson expected "$configured_marketplace_count" \
                             'type == "object" and length >= $expected' \
