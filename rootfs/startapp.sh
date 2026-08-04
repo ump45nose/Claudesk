@@ -33,6 +33,10 @@ set -- \
     --disable-setuid-sandbox \
     --password-store=basic
 
+if [ "${CLAUDE_DISABLE_GPU:-1}" = "1" ]; then
+    set -- "$@" --disable-gpu
+fi
+
 if [ "${COWORK_BRIDGE_ENABLED:-0}" = "1" ]; then
     printf '[claude-start] Cowork IPC wrapper enabled on loopback:%s\n' \
         "${COWORK_BRIDGE_INTERNAL_PORT:-9222}"

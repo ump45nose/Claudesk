@@ -1,10 +1,10 @@
 {
-  "name": "Claudesk",
-  "short_name": "Claudesk",
-  "description": "Remote Web and PWA bridge for the official Claude Desktop client",
-  "lang": "en",
+  "name": "Claude",
+  "short_name": "Claude",
+  "description": "Official Claude Desktop interface through the NAS Remote IPC Bridge",
+  "lang": "zh-CN",
   "id": "/",
-  "start_url": "/",
+  "start_url": "/task/new",
   "scope": "/",
   "display": "standalone",
   "prefer_related_applications": false,
@@ -26,12 +26,6 @@
     }
   ],
   "shortcuts": [
-    {
-      "name": "New chat",
-      "short_name": "New chat",
-      "url": "/chat/new",
-      "icons": [{"src": "/desktop-icon.png", "sizes": "512x512", "type": "image/png"}]
-    },
     {
       "name": "New task",
       "short_name": "New task",

@@ -1,7 +1,16 @@
-const CACHE_NAME = "claudesk-shell-v1";
+const CACHE_NAME = "claude-official-remote-20260804-2";
+const SHELL_ASSETS = [
+  "/",
+  "/remote-main-menu.css?v=20260801-2",
+  "/remote-main-menu.js?v=20260801-4",
+  "/remote-preload.js?v=20260804-2",
+  "/remote-shell.css?v=20260804-1",
+  "/manifest.webmanifest?v=20260801-1",
+  "/desktop-icon.png",
+];
 
 self.addEventListener("install", (event) => {
-  event.waitUntil(caches.open(CACHE_NAME));
+  event.waitUntil(caches.open(CACHE_NAME).then((cache) => cache.addAll(SHELL_ASSETS)));
   self.skipWaiting();
 });
 
@@ -45,10 +54,18 @@ self.addEventListener("fetch", (event) => {
     "/i18n/",
     "/images/",
   ].some((prefix) => url.pathname.startsWith(prefix));
+  const compatibilityAsset = [...url.searchParams.keys()]
+    .some((key) => key.startsWith("claudesk-"))
+    || /\/assets\/v1\/shared-(?:12-kUZ_jZyi|17-YFu3JFq7)\.js$/.test(url.pathname);
+  if (compatibilityAsset) {
+    event.respondWith(fetch(request, { cache: "no-store" }));
+    return;
+  }
   event.respondWith(caches.match(request).then(async (cached) => {
     if (cached) return cached;
     const response = await fetch(request);
-    if (response.ok && officialImmutableAsset) {
+    const cacheControl = response.headers.get("cache-control") || "";
+    if (response.ok && officialImmutableAsset && !/\bno-store\b/i.test(cacheControl)) {
       const copy = response.clone();
       caches.open(CACHE_NAME).then((cache) => cache.put(request, copy));
     }

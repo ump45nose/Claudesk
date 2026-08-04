@@ -44,6 +44,7 @@ RUN add-pkg \
         ovmf \
         procps \
         qemu-system-x86 \
+        xvfb \
         xdg-utils && \
     curl -fsSLo /usr/share/keyrings/claude-desktop-archive-keyring.asc \
         https://downloads.claude.ai/claude-desktop/key.asc && \
@@ -73,7 +74,7 @@ COPY --from=wrapper-builder /out/ /opt/claude-cowork-bridge/
 
 COPY rootfs/ /
 
-# Root inside some container runtimes has CAP_DAC_OVERRIDE and dash's `test -x`
+# On this NAS, root inside a container has CAP_DAC_OVERRIDE and dash's `test -x`
 # reports regular 0644 files as executable.  The upstream init script uses
 # `test -x` to distinguish literal environment files from scripts, so make that
 # decision from the actual mode bits instead.
@@ -92,9 +93,13 @@ RUN sed -i \
     sed -i \
         's/if \[ ! -x "${fpath}" \]; then/if ! stat -c "%A" "${fpath}" | grep -q "[xst]"; then/' \
         /etc/services.d/exit && \
+    rm -f /etc/services.d/xvnc/run && \
+    ln -s /opt/claude-headless/x11-run.sh /etc/services.d/xvnc/run && \
     test "$(/usr/bin/virtiofsd --version | awk '{print $2}')" = "1.13.3" && \
     chmod 0755 \
         /startapp.sh \
+        /opt/claude-headless/x11-run.sh \
+        /etc/cont-init.d/18-headless.sh \
         /etc/cont-init.d/20-claude-update.sh \
         /etc/cont-init.d/25-cowork-bridge-wrapper.sh \
         /etc/cont-init.d/30-claude-config.sh && \
