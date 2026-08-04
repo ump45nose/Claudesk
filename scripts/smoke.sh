@@ -2,7 +2,7 @@
 
 set -eu
 
-project_dir="$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)"
+project_dir="$(CDPATH='' cd -- "$(dirname -- "$0")/.." && pwd)"
 cd "$project_dir"
 
 container_name="claude-desktop"
@@ -22,3 +22,4 @@ curl -fsS --max-time 10 "http://127.0.0.1:${web_port}/" >/dev/null
 printf 'web=http://127.0.0.1:%s/ ok\n' "$web_port"
 
 "$project_dir/scripts/cowork-bridge-smoke.sh"
+
