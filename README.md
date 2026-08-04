@@ -2,9 +2,25 @@
 
 在 NAS 上以无头 Docker 容器运行 Anthropic 官方 Linux Claude Desktop，并通过轻量级 Remote IPC Bridge 在浏览器中使用 Chat、Cowork 与可选的 Code/Developer 能力。浏览器看到的是 Claude Desktop 随安装包提供的官方 `ion-dist` 界面；本项目只负责容器化、受限桥接和持久化，不重做消息渲染器。
 
-![Chat 移动端界面](docs/screenshots/chat-mobile.png)
+## 界面预览
 
-![Cowork 移动端界面](docs/screenshots/cowork-mobile.png)
+### PC 端
+
+<p align="center">
+  <img src="docs/screenshots/claudesk-home.png" alt="Claudesk PC 端首页" width="720">
+</p>
+
+<p align="center">
+  <img src="docs/screenshots/claudesk-developer.png" alt="Claudesk PC 端 Developer 页面" width="720">
+</p>
+
+### 移动端
+
+<p align="center">
+  <img src="docs/screenshots/chat-mobile.png" alt="Chat 移动端界面" width="280">
+  <img src="docs/screenshots/cowork-mobile.png" alt="Cowork 移动端界面" width="280">
+  <img src="docs/screenshots/claudesk-mobile.png" alt="Claudesk 移动端首页" width="280">
+</p>
 
 ## 适用场景
 
@@ -194,17 +210,17 @@ Compose 默认挂载：
 
 停止 Claude Desktop 后再对 `/config` 做一致性敏感的备份。Cowork VM 与工作数据可能额外占用约 25 GB，长期运行前请检查存储余量。
 
-## 截图
+## 截图资源
 
-仓库内的移动端截图位于：
+仓库内的截图文件位于 [`docs/screenshots/`](docs/screenshots/)：
 
-- [`docs/screenshots/chat-mobile.png`](docs/screenshots/chat-mobile.png)：Chat 远程界面。
-- [`docs/screenshots/cowork-mobile.png`](docs/screenshots/cowork-mobile.png)：Cowork 远程界面。
-- [`docs/screenshots/claudesk-home.png`](docs/screenshots/claudesk-home.png)：本次验证的桌面端首页。
-- [`docs/screenshots/claudesk-mobile.png`](docs/screenshots/claudesk-mobile.png)：本次验证的窄屏首页。
-- [`docs/screenshots/claudesk-developer.png`](docs/screenshots/claudesk-developer.png)：Developer 的 Trace/heap 文件页。
+- [`docs/screenshots/claudesk-home.png`](docs/screenshots/claudesk-home.png)：PC 端首页。
+- [`docs/screenshots/claudesk-developer.png`](docs/screenshots/claudesk-developer.png)：PC 端 Developer 的 Trace/heap 文件页。
+- [`docs/screenshots/chat-mobile.png`](docs/screenshots/chat-mobile.png)：Chat 移动端界面。
+- [`docs/screenshots/cowork-mobile.png`](docs/screenshots/cowork-mobile.png)：Cowork 移动端界面。
+- [`docs/screenshots/claudesk-mobile.png`](docs/screenshots/claudesk-mobile.png)：移动端首页。
 
-截图来自同一 Remote Bridge，适合在移动浏览器检查响应式布局；敏感数据请在重新截屏前确认已清理。
+README 预览按 PC 端 720px、移动端 280px 展示，避免窄屏截图在页面中占满宽度。截图来自同一 Remote Bridge；敏感数据请在重新截屏前确认已清理。
 
 ## 开发与贡献
 
