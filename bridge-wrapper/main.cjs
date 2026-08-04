@@ -939,6 +939,17 @@ function decodeIpcValue(value, argsEncoding) {
   return value;
 }
 
+function encodeIpcValue(value) {
+  if (value === undefined) return { [undefinedSentinelKey]: true };
+  if (Array.isArray(value)) return value.map(encodeIpcValue);
+  if (value && typeof value === "object") {
+    return Object.fromEntries(
+      Object.entries(value).map(([key, item]) => [key, encodeIpcValue(item)]),
+    );
+  }
+  return value;
+}
+
 function validateProtocolRequest(method, pathname) {
   const normalizedMethod = String(method || "GET").toUpperCase();
   if (!protocolRules.some((rule) =>
@@ -1342,8 +1353,8 @@ async function invoke(surface, method, args, argsEncoding) {
   const payload = Buffer.from(JSON.stringify({
     surface,
     method,
-    args: effectiveArgs,
-    argsEncoding: null,
+    args: encodeIpcValue(effectiveArgs),
+    argsEncoding: "json-undefined-v1",
   })).toString("base64");
   const expression = `(async () => {
     const encodedRequest = atob(${JSON.stringify(payload)});
