@@ -2,7 +2,7 @@
 
 set -eu
 
-project_dir="$(CDPATH='' cd -- "$(dirname -- "$0")/.." && pwd)"
+project_dir="$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)"
 profile_dir="$project_dir/security"
 profile_path="$profile_dir/claude-desktop.json"
 source_url="https://raw.githubusercontent.com/moby/profiles/refs/tags/seccomp/v0.2.1/seccomp/default.json"

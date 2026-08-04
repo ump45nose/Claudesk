@@ -4,24 +4,32 @@ services:
       context: .
       dockerfile: Dockerfile
     image: local/claude-desktop-nas:official-linux
+    container_name: claude-desktop
     hostname: claude-desktop
     ports:
-      - "${DESKTOP_BIND_ADDRESS:-0.0.0.0}:${WEB_PORT:-15820}:5800"
-      - "${BRIDGE_BIND_ADDRESS:-0.0.0.0}:${COWORK_WEB_PORT:-15821}:8080"
+      - "${COWORK_WEB_PORT:-15821}:8080"
+    extra_hosts:
+      - "fn-i3h510-1.tail0292a9.ts.net:100.102.63.126"
     env_file:
-      - "${CLAUDE_ENV_FILE:-.env}"
+      - .env
     environment:
       TZ: "${TZ:-Asia/Shanghai}"
       USER_ID: "${PUID:-1000}"
-      GROUP_ID: "${PGID:-1000}"
+      GROUP_ID: "${PGID:-1001}"
       SUP_GROUP_IDS: "${KVM_GID:-104}"
-      DISPLAY_WIDTH: "${DISPLAY_WIDTH:-1920}"
-      DISPLAY_HEIGHT: "${DISPLAY_HEIGHT:-1080}"
-      WEB_AUDIO: "1"
+      DISPLAY_WIDTH: "${DISPLAY_WIDTH:-1280}"
+      DISPLAY_HEIGHT: "${DISPLAY_HEIGHT:-720}"
+      WEB_AUDIO: "0"
       SECURE_CONNECTION: "0"
       WEB_AUTHENTICATION: "0"
       VNC_LOCALHOST_ONLY: "1"
       KEEP_APP_RUNNING: "1"
+      CLAUDE_HEADLESS: "${CLAUDE_HEADLESS:-1}"
+      CLAUDE_DISABLE_GPU: "${CLAUDE_DISABLE_GPU:-1}"
+      CLAUDE_COWORK_VM_MEMORY_GB: "${CLAUDE_COWORK_VM_MEMORY_GB:-2}"
+      CLAUDE_COWORK_VM_CPU_COUNT: "${CLAUDE_COWORK_VM_CPU_COUNT:-1}"
+      CLAUDE_COWORK_VM_IDLE_MINUTES: "${CLAUDE_COWORK_VM_IDLE_MINUTES:-30}"
+      CLAUDE_COWORK_VM_SCHEDULE_GUARD_MINUTES: "${CLAUDE_COWORK_VM_SCHEDULE_GUARD_MINUTES:-10}"
       CLAUDE_UPDATE_ON_START: "${CLAUDE_UPDATE_ON_START:-1}"
       CLAUDE_UPDATE_TIMEOUT_SECONDS: "${CLAUDE_UPDATE_TIMEOUT_SECONDS:-300}"
       COWORK_BRIDGE_ENABLED: "${COWORK_BRIDGE_ENABLED:-1}"
@@ -35,8 +43,8 @@ services:
       CLAUDE_GATEWAY_AUTH_SCHEME: "${CLAUDE_GATEWAY_AUTH_SCHEME:-bearer}"
       CLAUDE_INFERENCE_MODELS_JSON: "${CLAUDE_INFERENCE_MODELS_JSON:?Set CLAUDE_INFERENCE_MODELS_JSON in .env}"
     volumes:
-      - "${CLAUDE_CONFIG_DIR:-./data/config}:/config"
-      - "${CLAUDE_WORKSPACE_DIR:-./data/workspace}:/workspace"
+      - /vol2/1000/Docker/ClaudeDesktop/config:/config
+      - /vol2/1000/Docker/ClaudeDesktop/workspace:/workspace
     devices:
       - /dev/kvm:/dev/kvm
       - /dev/vhost-vsock:/dev/vhost-vsock
@@ -45,12 +53,15 @@ services:
     security_opt:
       - "seccomp=./security/claude-desktop.json"
     shm_size: "2gb"
+    mem_limit: "${CLAUDE_DESKTOP_MEMORY_LIMIT:-3g}"
+    networks:
+      - gateway_net
     healthcheck:
       test:
         - CMD-SHELL
         - >-
           pgrep -f '/usr/bin/claude-desktop|claude-desktop' >/dev/null
-          && curl -fsS --max-time 5 http://127.0.0.1:5800/ >/dev/null
+          && curl -fsS --max-time 5 http://127.0.0.1:${COWORK_BRIDGE_INTERNAL_PORT:-9222}/health >/dev/null
       interval: 30s
       timeout: 8s
       retries: 5
@@ -62,6 +73,7 @@ services:
       context: ./bridge
       dockerfile: Dockerfile
     image: local/claude-cowork-bridge:latest
+    container_name: claude-cowork-bridge
     network_mode: "service:claude-desktop"
     depends_on:
       claude-desktop:
@@ -80,14 +92,8 @@ services:
       COWORK_INTERNAL_FAILURE_EXIT_THRESHOLD: "${COWORK_INTERNAL_FAILURE_EXIT_THRESHOLD:-3}"
       CLAUDE_INFERENCE_MODELS_JSON: "${CLAUDE_INFERENCE_MODELS_JSON:?Set CLAUDE_INFERENCE_MODELS_JSON in .env}"
     volumes:
-      - "${CLAUDE_WORKSPACE_DIR:-./data/workspace}:/workspace"
-    cap_drop:
-      - ALL
-    security_opt:
-      - no-new-privileges:true
-    read_only: true
-    tmpfs:
-      - /tmp:size=64m,mode=1777
+      - /vol2/1000/Docker/ClaudeDesktop/workspace:/workspace
+    mem_limit: "${CLAUDE_COWORK_BRIDGE_MEMORY_LIMIT:-256m}"
     healthcheck:
       test:
         - CMD
@@ -99,3 +105,7 @@ services:
       retries: 5
       start_period: 30s
     restart: unless-stopped
+
+networks:
+  gateway_net:
+    external: true

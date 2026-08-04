@@ -3,9 +3,10 @@
 const http = require("node:http");
 const { randomBytes } = require("node:crypto");
 const { createReadStream } = require("node:fs");
+const { createConnection } = require("node:net");
 const { mkdir, open, readFile, readdir, rename, stat, unlink, writeFile } = require("node:fs/promises");
 const { basename, dirname, extname, join, normalize, resolve } = require("node:path");
-const { app, BrowserWindow, Menu, webContents } = require("electron");
+const { app, BrowserWindow, ipcMain, Menu, webContents } = require("electron");
 
 const HOST = "127.0.0.1";
 const PORT = Number(process.env.COWORK_BRIDGE_INTERNAL_PORT || 9222);
@@ -16,6 +17,74 @@ const developerActionsEnabled = process.env.CLAUDE_REMOTE_DEVELOPER_ACTIONS === 
 const infrastructureActionsEnabled =
   process.env.CLAUDE_REMOTE_INFRASTRUCTURE_ACTIONS === "1";
 const codeActionsEnabled = process.env.CLAUDE_REMOTE_CODE_ACTIONS === "1";
+
+function boundedInteger(value, fallback, minimum, maximum) {
+  const parsed = Number(value);
+  return Number.isInteger(parsed) && parsed >= minimum && parsed <= maximum
+    ? parsed
+    : fallback;
+}
+
+const coworkVmMemoryGB = boundedInteger(
+  process.env.CLAUDE_COWORK_VM_MEMORY_GB,
+  2,
+  1,
+  16,
+);
+const coworkVmIdleMinutes = boundedInteger(
+  process.env.CLAUDE_COWORK_VM_IDLE_MINUTES,
+  30,
+  1,
+  24 * 60,
+);
+const coworkVmScheduleGuardMinutes = boundedInteger(
+  process.env.CLAUDE_COWORK_VM_SCHEDULE_GUARD_MINUTES,
+  10,
+  1,
+  24 * 60,
+);
+const coworkVmIdlePollMs = 60 * 1000;
+let coworkVmLastActivityAt = Date.now();
+
+function noteCoworkVmActivity() {
+  coworkVmLastActivityAt = Date.now();
+}
+
+// The official Web renderer supplies its feature-flag default (currently
+// memoryGB=4) to startVM, and that explicit argument takes precedence over the
+// persisted Desktop preference. Clamp both configuration IPCs at the main
+// process boundary so every caller, including WebUI auto-start, gets the
+// operator-selected limit.
+const originalIpcMainHandle = ipcMain.handle.bind(ipcMain);
+ipcMain.handle = (channel, listener) => {
+  if (typeof channel !== "string" || typeof listener !== "function") {
+    return originalIpcMainHandle(channel, listener);
+  }
+  if (channel.endsWith("_$_ClaudeVM_$_startVM")) {
+    return originalIpcMainHandle(channel, (event, config) => {
+      noteCoworkVmActivity();
+      const safeConfig = config && typeof config === "object" && !Array.isArray(config)
+        ? config
+        : {};
+      return listener(event, { ...safeConfig, memoryGB: coworkVmMemoryGB });
+    });
+  }
+  if (channel.endsWith("_$_ClaudeVM_$_setYukonSilverConfig")) {
+    return originalIpcMainHandle(channel, (event, config) => {
+      const safeConfig = config && typeof config === "object" && !Array.isArray(config)
+        ? config
+        : {};
+      return listener(event, { ...safeConfig, memoryGB: coworkVmMemoryGB });
+    });
+  }
+  if (/\_\$_LocalAgentModeSessions_\$_(?:start|sendMessage)$/.test(channel)) {
+    return originalIpcMainHandle(channel, (...args) => {
+      noteCoworkVmActivity();
+      return listener(...args);
+    });
+  }
+  return originalIpcMainHandle(channel, listener);
+};
 
 const ionMimeTypes = {
   ".css": "text/css; charset=utf-8",
@@ -48,6 +117,7 @@ const allowedMethods = new Map([
   ])],
   ["LocalAgentModeSessions", new Set([
     "archive",
+    "delete",
     "getAll",
     "getDefaultWorkspaceFolders",
     "getSession",
@@ -936,6 +1006,206 @@ async function evaluateInOfficialRenderer(expression) {
   throw new Error("official Cowork renderer is not ready");
 }
 
+let coworkVmIdleState = {
+  checkedAt: null,
+  idleSince: null,
+  pid: null,
+  reason: "monitor-starting",
+};
+let coworkVmShutdownInProgress = false;
+
+async function findCoworkVmProcess() {
+  const entries = await readdir("/proc", { withFileTypes: true });
+  for (const entry of entries) {
+    if (!entry.isDirectory() || !/^\d+$/.test(entry.name)) continue;
+    try {
+      const args = (await readFile(`/proc/${entry.name}/cmdline`))
+        .toString("utf8")
+        .split("\0")
+        .filter(Boolean);
+      if (!args.some((arg) => arg.includes("qemu-system-x86_64")) ||
+          !args.some((arg) => arg.includes("claude-cowork-vm"))) continue;
+      const qmpIndex = args.indexOf("-qmp");
+      const qmpArgument = qmpIndex >= 0 ? args[qmpIndex + 1] : "";
+      const qmpSocket = /^unix:([^,]+)/.exec(qmpArgument)?.[1] || null;
+      return { args, pid: Number(entry.name), qmpSocket };
+    } catch (error) {
+      if (error?.code !== "ENOENT" && error?.code !== "EACCES") throw error;
+    }
+  }
+  return null;
+}
+
+function scheduledTaskTimestamp(task) {
+  const value = task?.nextRunAt ?? task?.nextRun ?? task?.nextScheduledAt ??
+    task?.scheduledFor ?? task?.nextExecutionAt;
+  if (typeof value === "number" && Number.isFinite(value)) {
+    return value < 10_000_000_000 ? value * 1000 : value;
+  }
+  if (typeof value === "string") {
+    const timestamp = Date.parse(value);
+    if (Number.isFinite(timestamp)) return timestamp;
+  }
+  return null;
+}
+
+async function readCoworkVmWorkState() {
+  const expression = `(async () => {
+    const root = globalThis["claude.web"];
+    if (!root?.LocalAgentModeSessions || !root?.CoworkScheduledTasks) {
+      return "__COWORK_BRIDGE_NOT_AVAILABLE__";
+    }
+    const [sessions, tasks] = await Promise.all([
+      root.LocalAgentModeSessions.getAll(),
+      root.CoworkScheduledTasks.getAllScheduledTasks(),
+    ]);
+    return JSON.stringify({ sessions, tasks });
+  })()`;
+  return JSON.parse(await evaluateInOfficialRenderer(expression));
+}
+
+function classifyCoworkVmWorkState(state, now) {
+  const sessions = Array.isArray(state?.sessions) ? state.sessions : [];
+  if (sessions.some((session) => session?.isRunning === true)) {
+    return { safeToStop: false, reason: "session-running" };
+  }
+  const tasks = Array.isArray(state?.tasks) ? state.tasks : [];
+  const enabledTasks = tasks.filter((task) =>
+    task?.enabled !== false && task?.status !== "disabled"
+  );
+  if (enabledTasks.some((task) =>
+    ["running", "executing", "in_progress"].includes(String(task?.status || "").toLowerCase())
+  )) {
+    return { safeToStop: false, reason: "scheduled-task-running" };
+  }
+  const nextRuns = enabledTasks.map(scheduledTaskTimestamp);
+  if (nextRuns.some((timestamp) => timestamp === null)) {
+    return { safeToStop: false, reason: "scheduled-task-time-unknown" };
+  }
+  const guardMs = coworkVmScheduleGuardMinutes * 60 * 1000;
+  if (nextRuns.some((timestamp) => timestamp >= now && timestamp - now <= guardMs)) {
+    return { safeToStop: false, reason: "scheduled-task-due-soon" };
+  }
+  return { safeToStop: true, reason: "idle" };
+}
+
+function qmpSystemPowerdown(socketPath) {
+  return new Promise((resolvePromise, rejectPromise) => {
+    if (!socketPath) {
+      rejectPromise(new Error("Cowork VM has no QMP socket"));
+      return;
+    }
+    const socket = createConnection(socketPath);
+    let buffer = "";
+    let capabilitiesSent = false;
+    const timeout = setTimeout(() => {
+      socket.destroy();
+      rejectPromise(new Error("QMP powerdown request timed out"));
+    }, 5000);
+    const finish = (error) => {
+      clearTimeout(timeout);
+      socket.destroy();
+      if (error) rejectPromise(error);
+      else resolvePromise();
+    };
+    socket.setEncoding("utf8");
+    socket.on("error", finish);
+    socket.on("data", (chunk) => {
+      buffer += chunk;
+      const lines = buffer.split("\r\n");
+      buffer = lines.pop() || "";
+      for (const line of lines) {
+        if (!line) continue;
+        let message;
+        try {
+          message = JSON.parse(line);
+        } catch {
+          continue;
+        }
+        if (message.QMP && !capabilitiesSent) {
+          capabilitiesSent = true;
+          socket.write(`${JSON.stringify({ execute: "qmp_capabilities", id: "capabilities" })}\r\n`);
+        } else if (message.id === "capabilities" && message.return) {
+          socket.write(`${JSON.stringify({ execute: "system_powerdown", id: "powerdown" })}\r\n`);
+        } else if (message.id === "powerdown" && message.return) {
+          finish();
+        } else if (message.error) {
+          finish(new Error(message.error.desc || "QMP command failed"));
+        }
+      }
+    });
+  });
+}
+
+async function coworkVmIdleCheck() {
+  if (coworkVmShutdownInProgress) return;
+  const now = Date.now();
+  try {
+    const vm = await findCoworkVmProcess();
+    if (!vm) {
+      coworkVmIdleState = {
+        checkedAt: now,
+        idleSince: null,
+        pid: null,
+        reason: "vm-not-running",
+      };
+      return;
+    }
+    const priorPid = coworkVmIdleState.pid;
+    const workState = classifyCoworkVmWorkState(await readCoworkVmWorkState(), now);
+    if (!workState.safeToStop) {
+      coworkVmIdleState = {
+        checkedAt: now,
+        idleSince: null,
+        pid: vm.pid,
+        reason: workState.reason,
+      };
+      return;
+    }
+    const idleSince = priorPid === vm.pid && coworkVmIdleState.idleSince
+      ? coworkVmIdleState.idleSince
+      : Math.max(now, coworkVmLastActivityAt);
+    coworkVmIdleState = {
+      checkedAt: now,
+      idleSince,
+      pid: vm.pid,
+      reason: "idle",
+    };
+    if (now - idleSince < coworkVmIdleMinutes * 60 * 1000) return;
+
+    // Re-read official session/task state immediately before requesting an ACPI
+    // powerdown. Any renderer/API uncertainty fails closed and leaves the VM on.
+    const confirmed = classifyCoworkVmWorkState(await readCoworkVmWorkState(), Date.now());
+    if (!confirmed.safeToStop) {
+      coworkVmIdleState = {
+        checkedAt: Date.now(),
+        idleSince: null,
+        pid: vm.pid,
+        reason: confirmed.reason,
+      };
+      return;
+    }
+    coworkVmShutdownInProgress = true;
+    coworkVmIdleState = {
+      checkedAt: Date.now(),
+      idleSince,
+      pid: vm.pid,
+      reason: "powerdown-requested",
+    };
+    await qmpSystemPowerdown(vm.qmpSocket);
+    console.log(`[cowork-wrapper] requested idle VM ACPI powerdown for pid ${vm.pid}`);
+  } catch (error) {
+    coworkVmIdleState = {
+      ...coworkVmIdleState,
+      checkedAt: Date.now(),
+      reason: `monitor-error: ${error instanceof Error ? error.message : String(error)}`,
+    };
+    console.warn("[cowork-wrapper] idle VM monitor left VM running:", error);
+  } finally {
+    coworkVmShutdownInProgress = false;
+  }
+}
+
 async function gatewaySettingsRenderer() {
   const findSetupWindow = () => rendererCandidates().find((contents) =>
     contents.getURL().includes("/setup-desktop-3p")
@@ -1057,7 +1327,24 @@ async function readBootFeatures() {
 async function invoke(surface, method, args, argsEncoding) {
   const decodedArgs = decodeIpcValue(args, argsEncoding);
   validateInvocation(surface, method, decodedArgs);
-  const payload = Buffer.from(JSON.stringify({ surface, method, args, argsEncoding })).toString("base64");
+  let effectiveArgs = decodedArgs;
+  if (surface === "ClaudeVM" && method === "startVM") {
+    noteCoworkVmActivity();
+    const requested = decodedArgs[0];
+    const safeConfig = requested && typeof requested === "object" && !Array.isArray(requested)
+      ? requested
+      : {};
+    effectiveArgs = [{ ...safeConfig, memoryGB: coworkVmMemoryGB }];
+  } else if (surface === "LocalAgentModeSessions" &&
+      ["start", "sendMessage"].includes(method)) {
+    noteCoworkVmActivity();
+  }
+  const payload = Buffer.from(JSON.stringify({
+    surface,
+    method,
+    args: effectiveArgs,
+    argsEncoding: null,
+  })).toString("base64");
   const expression = `(async () => {
     const encodedRequest = atob(${JSON.stringify(payload)});
     const requestBytes = Uint8Array.from(
@@ -1419,6 +1706,12 @@ const server = http.createServer(async (request, response) => {
       sendJson(response, 200, {
         ok: true,
         value: {
+          coworkVmPolicy: {
+            idleMinutes: coworkVmIdleMinutes,
+            memoryGB: coworkVmMemoryGB,
+            monitor: coworkVmIdleState,
+            scheduleGuardMinutes: coworkVmScheduleGuardMinutes,
+          },
           platform: process.platform,
           version: app.getVersion(),
         },
@@ -1518,4 +1811,11 @@ const server = http.createServer(async (request, response) => {
 
 server.listen(PORT, HOST, () => {
   console.log(`[cowork-wrapper] internal bridge listening on ${HOST}:${PORT}`);
+});
+
+app.whenReady().then(() => {
+  setTimeout(() => {
+    coworkVmIdleCheck();
+    setInterval(coworkVmIdleCheck, coworkVmIdlePollMs).unref();
+  }, coworkVmIdlePollMs).unref();
 });

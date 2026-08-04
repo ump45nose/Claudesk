@@ -9,6 +9,26 @@ models_json="${CLAUDE_INFERENCE_MODELS_JSON:-}"
 remote_gateway_settings="${CLAUDE_REMOTE_GATEWAY_SETTINGS:-0}"
 remote_code_actions="${CLAUDE_REMOTE_CODE_ACTIONS:-0}"
 allowed_egress_hosts_json="${CLAUDE_EGRESS_ALLOWED_HOSTS_JSON:-}"
+vm_memory_gb="${CLAUDE_COWORK_VM_MEMORY_GB:-2}"
+vm_cpu_count="${CLAUDE_COWORK_VM_CPU_COUNT:-1}"
+
+case "$vm_memory_gb" in
+    1|2|3|4|5|6|7|8|9|10|11|12|13|14|15|16)
+        ;;
+    *)
+        printf '[claude-config] ERROR: CLAUDE_COWORK_VM_MEMORY_GB must be an integer from 1 to 16\n' >&2
+        exit 1
+        ;;
+esac
+
+case "$vm_cpu_count" in
+    1|2|3|4|5|6|7|8)
+        ;;
+    *)
+        printf '[claude-config] ERROR: CLAUDE_COWORK_VM_CPU_COUNT must be an integer from 1 to 8\n' >&2
+        exit 1
+        ;;
+esac
 
 case "$remote_gateway_settings" in
     0|1)
@@ -82,8 +102,9 @@ fi
 install -d -o root -g root -m 0755 /etc/claude-desktop
 tmp_file="$(mktemp /etc/claude-desktop/.managed-settings.XXXXXX)"
 developer_tmp=""
-marketplace_list=""
-trap 'rm -f "$tmp_file" "$developer_tmp" "$marketplace_list"' EXIT HUP INT TERM
+app_config_tmp=""
+legacy_app_config_tmp=""
+trap 'rm -f "$tmp_file" "$developer_tmp" "$app_config_tmp" "$legacy_app_config_tmp"' EXIT HUP INT TERM
 
 jq -n \
     --arg base_url "$base_url" \
@@ -136,6 +157,62 @@ rm -f "$developer_tmp"
 developer_tmp=""
 printf '[claude-config] official Developer menu follows CLAUDE_REMOTE_GATEWAY_SETTINGS=%s\n' \
     "$remote_gateway_settings"
+
+# These are official Desktop preferences consumed by the Linux VM startup
+# path. The app's getAppConfigPath() resolves to claude_desktop_config.json and
+# reads them from its `preferences` object. Merge there instead of patching
+# QEMU arguments or the packaged application.
+app_config="$user_data_dir/claude_desktop_config.json"
+if [ -L "$app_config" ]; then
+    printf '[claude-config] ERROR: app config must not be a symlink\n' >&2
+    exit 1
+fi
+app_config_tmp="$(mktemp "$user_data_dir/.config.XXXXXX")"
+if [ -f "$app_config" ]; then
+    jq \
+        --argjson memory_gb "$vm_memory_gb" \
+        --argjson cpu_count "$vm_cpu_count" \
+        '.preferences = ((.preferences // {}) + {
+            vmMemoryGB: $memory_gb,
+            vmCpuCount: $cpu_count,
+            coworkScheduledTasksEnabled: true
+        })
+        | del(.vmMemoryGB, .vmCpuCount, .coworkScheduledTasksEnabled)' \
+        "$app_config" > "$app_config_tmp"
+else
+    jq -n \
+        --argjson memory_gb "$vm_memory_gb" \
+        --argjson cpu_count "$vm_cpu_count" \
+        '{preferences: {
+            vmMemoryGB: $memory_gb,
+            vmCpuCount: $cpu_count,
+            coworkScheduledTasksEnabled: true
+        }}' > "$app_config_tmp"
+fi
+install -o "$user_id" -g "$group_id" -m 0600 "$app_config_tmp" "$app_config"
+rm -f "$app_config_tmp"
+app_config_tmp=""
+
+# Clean only the three fields that older revisions of this image mistakenly
+# wrote to Electron's separate config.json state file. Preserve every other
+# key, including any unrelated preferences that may be added in the future.
+legacy_app_config="$user_data_dir/config.json"
+if [ -f "$legacy_app_config" ] && [ ! -L "$legacy_app_config" ]; then
+    legacy_app_config_tmp="$(mktemp "$user_data_dir/.legacy-config.XXXXXX")"
+    jq '
+        del(.vmMemoryGB, .vmCpuCount, .coworkScheduledTasksEnabled)
+        | if (.preferences | type) == "object" then
+            .preferences |= del(.vmMemoryGB, .vmCpuCount, .coworkScheduledTasksEnabled)
+          else . end
+        | if .preferences == {} then del(.preferences) else . end
+    ' "$legacy_app_config" > "$legacy_app_config_tmp"
+    install -o "$user_id" -g "$group_id" -m 0600 \
+        "$legacy_app_config_tmp" "$legacy_app_config"
+    rm -f "$legacy_app_config_tmp"
+    legacy_app_config_tmp=""
+fi
+printf '[claude-config] Cowork VM constrained to %s GiB / %s vCPU; scheduled tasks enabled\n' \
+    "$vm_memory_gb" "$vm_cpu_count"
 
 if [ "$remote_gateway_settings" = "1" ]; then
     config_library="$user_data_dir/configLibrary"
@@ -201,20 +278,15 @@ if [ "$remote_gateway_settings" = "1" ]; then
             known_marketplaces_complete=0
             marketplace_session_root="$user_data_dir/local-agent-mode-sessions"
             if [ -d "$marketplace_session_root" ]; then
-                marketplace_list="$(mktemp /tmp/claude-marketplaces.XXXXXX)"
-                find "$marketplace_session_root" \
-                    -type f -name known_marketplaces.json \
-                    -print > "$marketplace_list"
-                while IFS= read -r known_marketplaces; do
+                for known_marketplaces in $(find "$marketplace_session_root" \
+                    -type f -name known_marketplaces.json 2>/dev/null); do
                     if jq -e --argjson expected "$configured_marketplace_count" \
                         'type == "object" and length >= $expected' \
                         "$known_marketplaces" >/dev/null; then
                         known_marketplaces_complete=1
                         break
                     fi
-                done < "$marketplace_list"
-                rm -f "$marketplace_list"
-                marketplace_list=""
+                done
             fi
             if [ "$known_marketplaces_complete" -eq 1 ]; then
                 marketplace_tmp="$(mktemp "$config_library/.marketplaces.XXXXXX")"

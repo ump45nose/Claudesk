@@ -219,13 +219,33 @@
     throw lastError || new Error("Remote Desktop bridge is unavailable");
   }
 
-  function invoke(surface, method, args) {
-    return bridgeRequest("/api/remote/ipc", {
+  function rememberChatSessions(value) {
+    const sessions = Array.isArray(value) ? value : [value];
+    const chatSessionIds = new Set(
+      Array.isArray(config.chatSessionIds) ? config.chatSessionIds : [],
+    );
+    for (const session of sessions) {
+      if (session?.sessionType === "chat" && typeof session.sessionId === "string") {
+        chatSessionIds.add(session.sessionId);
+      }
+    }
+    config.chatSessionIds = [...chatSessionIds];
+  }
+
+  async function invoke(surface, method, args) {
+    const value = await bridgeRequest("/api/remote/ipc", {
       surface,
       method,
       args: encodeIpcValue(args),
       argsEncoding: "json-undefined-v1",
     });
+    if (
+      surface === "LocalAgentModeSessions"
+      && (method === "getSession" || method === "getAll")
+    ) {
+      rememberChatSessions(value);
+    }
+    return value;
   }
 
   function invokeSettings(surface, method, args) {
@@ -731,7 +751,16 @@
 
   if ("serviceWorker" in navigator) {
     addEventListener("load", () => {
-      navigator.serviceWorker.register("/service-worker.js").catch(() => {});
+      let reloadingForUpdatedWorker = false;
+      navigator.serviceWorker.addEventListener("controllerchange", () => {
+        if (reloadingForUpdatedWorker) return;
+        reloadingForUpdatedWorker = true;
+        location.reload();
+      });
+      navigator.serviceWorker.register(
+        "/service-worker.js?v=20260804-2",
+        { updateViaCache: "none" },
+      ).then((registration) => registration.update()).catch(() => {});
     });
   }
 })();

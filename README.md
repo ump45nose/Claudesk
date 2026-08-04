@@ -1,257 +1,359 @@
-# Claudesk
+# Claude Desktop NAS
 
-> 在 NAS 上运行官方 Claude Desktop，并通过浏览器或 PWA 远程使用同一套 Chat、Cowork 与 Code 数据。
+Runs Anthropic's official Linux Claude Desktop package in a browser-accessible
+GUI container. Claude Desktop uses its supported third-party inference
+configuration and stores Chat, Cowork, and Code state under the persistent
+`/config` mount.
 
-[![Validate](https://github.com/ump45nose/Claudesk/actions/workflows/validate.yml/badge.svg)](https://github.com/ump45nose/Claudesk/actions/workflows/validate.yml)
+## Chat and Cowork Remote IPC Bridge
 
-Claudesk 将 Anthropic 官方 Linux Claude Desktop 放进带 KVM 的 Docker 容器，通过严格白名单的 Remote IPC Bridge，把当前安装包内的官方 `ion-dist` 界面直接呈现给浏览器。它不是 noVNC，也没有重新实现一套聊天 UI。
+The production headless stack exposes one direct browser endpoint and one
+HTTPS reverse-proxy entry point:
 
-项目支持第三方推理 Gateway、移动 Web/PWA、多端共享本地会话、官方包启动更新，以及按功能分级开放的 Projects、Artifacts、Memory、Scheduled Tasks、MCP、Plugins、Skills 与 Code 能力。
+- `http://NAS_IP:15821` is the responsive Chat/Cowork WebUI and Remote IPC
+  Bridge API.
+- `https://claude-home.172906573.xyz:28443` is the installable PWA endpoint
+  through the host's existing Nginx Proxy Manager and Authelia.
 
-> [!IMPORTANT]
-> Claudesk 是非官方社区项目，与 Anthropic 无隶属关系。仓库不包含 Claude Desktop 安装包或 `ion-dist` 静态资源；镜像构建时从 Anthropic 的签名 APT 仓库安装官方客户端。
+The Cowork endpoint is not VNC. Its request path is browser HTTP -> bridge ->
+loopback-only main-process adapter -> the trusted official `app://localhost`
+renderer -> Claude Desktop IPC -> the official Cowork session manager and VM.
+It reads and controls the same persisted sessions as the native Desktop window
+without copying or directly editing session files.
 
-## 界面预览
+The adapter endpoint is bound to `127.0.0.1` inside the shared container
+network namespace and is never published to the NAS. Claude Desktop explicitly
+rejects unsigned CDP startup, so the adapter keeps the official ASAR at its
+normal path and injects a two-file entry shim after each signed-package update.
+Only a versioned Cowork method allowlist is exposed. Destructive methods remain
+disabled by default.
 
-以下截图来自运行中的官方 Claude Desktop 前端，未包含域名、账号、会话标题或聊天内容。
+Chat and Cowork share Claude Desktop's official `LocalAgentModeSessions`
+manager but are separated by the persisted `sessionType`. Typed Chat endpoints
+only accept `sessionType=chat`; typed Cowork endpoints exclude those sessions.
+Both modes therefore use the same official local history while remaining
+separate in remote clients.
 
-| Chat | Cowork |
-| --- | --- |
-| <img src="docs/screenshots/chat-mobile.png" alt="Claudesk Chat mobile WebUI" width="320"> | <img src="docs/screenshots/cowork-mobile.png" alt="Claudesk Cowork mobile WebUI" width="320"> |
+The primary WebUI is the official `ion-dist` interface installed by the current
+Claude Desktop package. It is not an assistant-ui or locally recreated message
+view. The bridge reads the entry and hashed assets from the running Desktop
+container on each request, so package updates automatically select the matching
+official frontend. No official frontend bundle or icon is copied into this
+project. The supplied CJK-complete Anthropic Serif font is served separately
+for Chinese response typography.
 
-## 项目特色
+Only the response for the official `index.html` is modified. It receives a
+small Remote Preload Shim before the official module starts. The shim defines
+`globalThis["claude.web"]` from a server-generated method allowlist and sends
+those calls to the loopback-only Desktop renderer bridge. Native Desktop event
+callbacks are relayed back over SSE, so permission and session events retain
+their official payloads. Code/`LocalSessions` is exposed only when the separate
+`CLAUDE_REMOTE_CODE_ACTIONS=1` opt-in is enabled.
 
-- **官方客户端与官方界面**：安装 Anthropic 官方 Linux 包，运行时读取当前版本的 `ion-dist`，不复制、不仿制前端。
-- **真正的 Remote IPC Bridge**：浏览器调用经双层方法白名单转发到官方 Electron renderer/main IPC；不直接读写 Claude 会话数据库。
-- **多端共享状态**：Desktop、Web 与 PWA 使用同一个持久化 `/config`，Chat、Cowork 和 Code 会话保持一致。
-- **第三方推理 Gateway**：支持官方 Desktop 的 Gateway 模式、自定义模型别名与 `bearer`/`x-api-key` 认证。
-- **API Key 不下发**：默认由容器内的 root-owned managed settings 持有凭据，浏览器 bootstrap 不包含 Gateway API Key。
-- **移动 Web 与 PWA**：保留官方视觉和消息模型，只注入安全区、移动布局、断线恢复和浏览器能力兼容层。
-- **官方包自动更新**：每次容器启动前检查 Anthropic 签名仓库；更新失败时继续运行已安装版本。
-- **功能分级开放**：Gateway 编辑、Developer、基础设施写操作与 Code 分别由独立环境变量控制，默认关闭高权限能力。
-- **Cowork VM 支持**：使用 KVM、vhost-vsock、QEMU 和校验固定版本的 `virtiofsd`，无需特权容器或 `CAP_SYS_ADMIN`。
-- **可审计安全边界**：本地桥只监听共享网络命名空间的 loopback；公网桥只暴露显式 allowlist，并拒绝任意路径、任意 Electron 命令和凭据字段响应。
+The shim also relays the installed Desktop runtime's Chat/Cowork capabilities
+and, when enabled, the official Code capability records. The wrapper reads
+them from Desktop's
+official `getSupportedFeaturesSync()` evaluator so Linux's asynchronous
+virtualization probe cannot leave the remote UI stuck on the window's
+transient startup snapshot. These official flags keep the 3P route selector
+and Chat/Cowork sidebar on the bridged surfaces; native-only feature flags are not
+advertised to the browser.
 
-## 工作原理
+Cowork additionally requires ion-dist's own Desktop-runtime check. The shim
+adds the running official package version as the `Claude/<version>` user-agent
+token and exposes only `claudeAppBindings.registerBinding`/
+`unregisterBinding`, which are the two identity/lifecycle primitives used by
+that check. The version comes from Electron `app.getVersion()` after the
+startup update check, so it stays aligned with automatic package upgrades.
+When `CLAUDE_REMOTE_DEVELOPER_ACTIONS=1`, the bridge also exposes the official
+allowlisted MCP, local Skill, marketplace, and Plugin management IPC used by
+the shipped Directory and settings screens. Unrelated native bindings remain
+absent.
 
-```mermaid
-flowchart LR
-    B["Browser / PWA"] -->|"HTTPS + Authelia"| R["Reverse proxy"]
-    B -. "trusted LAN recovery" .-> W["Remote Web Bridge :8080"]
-    R --> W
-    W -->|"allowlisted HTTP / SSE"| L["Loopback Desktop adapter :9222"]
-    L -->|"official renderer IPC"| D["Claude Desktop"]
-    D --> G["Third-party inference Gateway"]
-    D --> V["Cowork KVM/QEMU VM"]
-    D --> C["Persistent /config"]
-    V --> X["Persistent /workspace"]
+When `CLAUDE_REMOTE_INFRASTRUCTURE_ACTIONS=1`, the official interface also gets
+the exact mutation IPC used by Cowork Projects/Spaces, Artifact import and
+sharing controls, Memory CRUD, and Scheduled Tasks create/edit/status flows.
+The general destructive switch remains off: only Artifact deletion, account-
+memory deletion, and Space deletion are admitted by this narrower flag;
+`resetMemories`, bridge reset, and Artifact version restore remain unavailable.
+
+When `CLAUDE_REMOTE_CODE_ACTIONS=1`, the official Code tab receives the local
+session, transcript, Git, terminal, permission, MCP, and workspace file IPC it
+uses. Code executes inside the official Desktop container and its normal
+working root is the mounted `/workspace`; it does not execute on the browser or
+the device opening the WebUI. Remote-control, SSH, cloud teleport, PR mutation,
+and automatic repository commit/stash/discard methods are not published.
+
+Remote attachments use a browser file picker rather than Electron's native
+dialog, because a native dialog would open inside the hidden Linux container.
+Selected files are uploaded in one batch (50 MiB maximum) to a unique directory
+under `/workspace/RemoteUploads`, then their server paths are passed to the
+unchanged official Cowork APIs. Open/download uses the browser and Reveal opens
+a read-only NAS workspace directory view. A browser cannot open Explorer/Finder
+on the phone or PC that is viewing the WebUI.
+
+The official frontend's selected HTTP requests, including `/edge-api/bootstrap`,
+`/api/bootstrap`,
+model configuration, account bootstrap, and title generation, are forwarded to
+the official Desktop `app://localhost` third-party protocol handler. Both the
+public bridge and the Desktop wrapper enforce the same method/path allowlists.
+Only `accept`, `accept-language`, and `content-type` request headers cross that
+boundary. JSON responses containing credential field names are rejected. By
+default the Gateway API key exists only in the Desktop container and is neither
+present in the Web bridge environment nor injected into browser bootstrap data.
+
+The WebUI also ships a local manifest, mobile safe-area rules, and a service
+worker. Its 512px PWA icon is served from the installed official Desktop package
+at runtime. API
+requests are never cached; the injected entry uses network-first recovery and
+official content-hashed assets use cache-first recovery. Responsive browser use
+works over the direct HTTP port. The Remote Preload supplies an RFC 4122 UUID v4
+compatibility function backed by `crypto.getRandomValues` because Chromium does
+not expose `crypto.randomUUID` to an HTTP LAN origin. When `SubtleCrypto` is
+also unavailable, only SHA-256/384/512 digest calls are forwarded to a dedicated
+NAS endpoint; key generation, signing, encryption, and arbitrary algorithms are
+not polyfilled. PWA installation and service workers still require a secure
+HTTPS origin. Direct `http://LAN_IP:15821` browsing works but cannot trigger a
+standards-compliant PWA install; use
+`https://claude-home.172906573.xyz:28443` for installation.
+
+The Nginx entry reuses the existing `*.172906573.xyz` certificate and proxies
+to `claude-desktop:8080` over the shared `gateway_net`, with SSE buffering
+disabled. It uses the same Authelia AuthRequest endpoint as the other protected
+`*-home` services. The existing `*.172906573.xyz` Authelia access-control rule
+requires two-factor authentication; no source-IP allowlist is applied. LAN and
+Tailnet DNS should resolve the hostname to the NAS (`192.168.31.201` on LAN or
+the NAS Tailscale address).
+
+Open WebUI clients share a server-sent event stream at
+`GET /api/events?mode=chat|cowork&sessionId=:id`. The bridge reads the official
+Desktop session list once per second for all connected clients and de-duplicates
+transcript reads per selected session, then publishes title, model, running
+state, and transcript changes to every subscriber. Transcript events contain
+only fields required by the renderer; internal Desktop metadata and thinking
+signatures are not forwarded. Browsers reconnect with native `EventSource`
+semantics and fall back to a five-second HTTP poll while the stream is down.
+The response includes `X-Accel-Buffering: no` for the active Nginx reverse
+proxy.
+
+Remote official-interface endpoints are:
+
+- `POST /api/remote/ipc` for allowlisted `claude.web` function calls
+- `POST /api/remote/store` for field-sanitized Desktop state stores
+- `POST /api/remote/settings` for the opt-in official Gateway editor bridge
+- `GET|PUT /api/account_profile` for field-restricted profile/instruction settings
+- selected original `/api/bootstrap` and organization protocol routes
+
+Gateway credentials and provider settings remain container-managed when
+`CLAUDE_REMOTE_GATEWAY_SETTINGS=0`. Setting it to `1` is an explicit temporary
+opt-in: the environment configuration seeds the official writable
+`configLibrary` once, the official `/setup-desktop-3p` editor is bridged, and
+subsequent edits persist under `/config`. On startup the same opt-in writes the
+official `developer_settings.json` `allowDevTools` field, which makes the
+official `Developer` top-level menu and its `Configure Third-Party Inference…`
+item available; setting the variable back to `0` disables that official mode
+on the next restart. In enabled mode credentials cross the browser connection,
+so use it only behind HTTPS/authentication or on a trusted network.
+
+The account menu's official `Inference configuration` item additionally
+depends on `Custom3pSetup.getLoginDesktop3pStatus()`. The bridge exposes that
+single read-only status method and strips the response to provider, source,
+bootstrap host, and interactive-auth flags; credentials are never included.
+
+The official Linux bundle currently renders its user-menu `Inference
+configuration` action with a no-op click helper. The Remote Preload Shim
+intercepts only that exact official menu item and opens
+`/setup-desktop-3p`; the normal Claude `Settings` modal and all other menu
+items retain their original behavior. The browser route adds a single Back to
+Claude button to the official setup header and reconnects to the main view
+after an expected Desktop relaunch transport interruption.
+
+The top-left Windows hamburger normally invokes Electron's native
+`BrowserNavigation.requestMainMenuPopup()`, which cannot paint an operating-
+system menu inside a Web browser. The bridge reads the current File/Edit/View/
+Developer/Help menu tree from Electron's live `Menu.getApplicationMenu()` and
+renders that hierarchy in the Web/PWA layer using Claude's current design
+tokens. The account menu remains a separate official ion-dist control. Safe
+browser equivalents such as Settings, reload, zoom, copy URL, edit roles, and
+Configure Third-Party Inference are enabled. Reload MCP Configuration uses one
+dedicated no-argument, rate-limited action instead of a general main-process
+command endpoint. When `CLAUDE_REMOTE_DEVELOPER_ACTIONS=1`, the remaining
+official Developer actions are exposed through exact action identifiers: native
+DevTools, main-process debugger, performance and memory tracing, and heap
+snapshot. MCP log, `claude_desktop_config.json`, and
+`developer_settings.json` use an allowlisted no-cache Web viewer/editor;
+official trace and heap files use an allowlisted streaming download endpoint.
+The same high-privilege switch enables the shipped `CustomPlugins`,
+`LocalPlugins`, `PluginBridgeMcp`, local Skill, and direct MCP management
+methods plus their official progress/status listeners. Repository cloning,
+plugin installation, enablement, OAuth, and MCP operations still execute in
+Claude Desktop's main process and persistent data directories; the browser
+does not reimplement them.
+No arbitrary filesystem path or generic Electron action is accepted. These
+surfaces can reveal credentials and diagnostics, so keep the flag disabled
+unless the service is behind trusted HTTPS authentication.
+
+The older typed Chat and Cowork endpoints remain as narrow smoke-test and
+recovery surfaces; they are no longer the primary browser UI implementation.
+
+Chat endpoints are:
+
+- `GET /api/chat/models`
+- `GET|POST /api/chat/sessions`
+- `GET /api/chat/sessions/:id`
+- `GET /api/chat/sessions/:id/transcript`
+- `POST /api/chat/sessions/:id/messages`
+- `POST /api/chat/sessions/:id/stop`
+- `PATCH /api/chat/sessions/:id/model`
+- `PATCH /api/chat/sessions/:id/title`
+
+Creating a Chat session accepts `{"model":"claude-opus-5","message":"..."}`.
+The bridge asks Claude Desktop's official local title generator for the title,
+then starts the session through official renderer IPC. Continuing a session,
+switching models, stopping it, and reading its transcript use the same IPC
+surface; the bridge never calls the inference Gateway directly.
+There is intentionally no application authentication in this stage. Port
+`15821` is a normal host port binding, not a Tailscale Serve/Funnel service.
+LAN clients can still use `LAN_IP:15821`; clients already joined to the
+Tailscale network can use `TAILSCALE_IP:15821`. Prefer the HTTPS hostname for
+PWA use. Authelia protects the HTTPS entry, while the direct host port remains
+an intentionally trusted-network-only recovery endpoint.
+
+Validate the read path with:
+
+```sh
+./scripts/cowork-bridge-smoke.sh
+./scripts/chat-bridge-smoke.sh
 ```
 
-Web 请求链路为：
+Then use the UI to create or continue a Chat conversation, switch between
+`claude-opus-5` and `claude-opus-4-8`, and confirm the same persisted state is
+visible after a Desktop restart. The Cowork tab opens existing local tasks and
+uses the same readable transcript renderer on desktop and mobile.
 
-```text
-browser -> Remote Web Bridge -> loopback-only adapter
-        -> official app://localhost renderer -> Claude Desktop IPC
-```
+## Boundaries
 
-Remote Bridge 每次请求官方页面时都从当前已安装的 Desktop 包读取入口和内容哈希资源，只在 HTML 入口注入 Remote Preload Shim、PWA manifest 和少量移动端样式。官方客户端更新后，前端资源会随之切换。
+- Claude is installed from Anthropic's signed APT repository.
+- Every container start checks the signed repository and upgrades the package
+  before the GUI launches.
+- Only the Cowork bridge (`15821`) is published; the Electron/Xvfb renderer and
+  raw VNC remain internal to the container.
+- Phase 1 intentionally has no application authentication. The ports bind
+  directly to the NAS host and should only be reachable from trusted networks
+  (LAN or the existing Tailscale mesh). Nginx Proxy Manager and Authelia now
+  provide the authenticated HTTPS/PWA entry.
+- The container is not privileged and receives only `/dev/kvm` and
+  `/dev/vhost-vsock` for Cowork.
+- Cowork uses upstream Rust `virtiofsd` 1.13.3, built from a
+  checksum-pinned release source in a digest-pinned Rust builder image. This
+  matches the current official helper CLI and needs no extra file or container
+  capabilities when the helper selects its container-oriented sandbox mode.
+- Chromium keeps its user-namespace sandbox. A project-local seccomp profile
+  starts from Moby's pinned default profile and permits only the namespace
+  combinations observed during Claude Desktop startup plus `AF_VSOCK` for the
+  official Cowork VM helper; the container does not use
+  `seccomp=unconfined`, `--privileged`, or `CAP_SYS_ADMIN`.
+- The host-side Claude Code sandbox has both `bubblewrap` and `socat`, so it
+  does not silently fall back to unsandboxed execution because a proxy helper
+  is missing.
+- The managed Gateway configuration is root-owned, group-readable by the
+  application, and mode `0440`, matching Claude Desktop's managed-policy
+  ownership checks without making the API key world-readable.
+- Static Gateway mode starts Electron with `--password-store=basic` to avoid a
+  GNOME Keyring unlock prompt on every headless container start. Do not rely on
+  this deployment for encrypted persistence of interactive login secrets.
 
-## 前置条件
+## Configure and run
 
-- Linux 主机与 Docker Engine
-- Docker Compose v2
-- 可用的 `/dev/kvm` 与 `/dev/vhost-vsock`
-- 支持 Anthropic Messages API 语义的第三方 Gateway
-- 至少 2 GiB shared memory；Cowork VM 建议额外预留约 25 GiB 磁盘空间
-- HTTPS 反向代理用于 PWA；推荐同时接入 Authelia 或等价认证层
+Edit `.env` and set:
 
-目前主要在 x86_64 Linux NAS 上验证。官方 APT 仓库也提供 arm64 包，但本项目尚未声明 arm64 端到端验证完成。
+- `CLAUDE_GATEWAY_BASE_URL`
+- `CLAUDE_GATEWAY_API_KEY`
+- `CLAUDE_GATEWAY_AUTH_SCHEME`
+- `CLAUDE_INFERENCE_MODELS_JSON`
+- `CLAUDE_REMOTE_GATEWAY_SETTINGS` (`0` by default; `1` temporarily enables the
+  official remote Gateway editor)
+- `CLAUDE_REMOTE_DEVELOPER_ACTIONS` (`0` by default; `1` enables high-privilege
+  Developer actions and the allowlisted config/log/trace surface)
+- `CLAUDE_REMOTE_INFRASTRUCTURE_ACTIONS` (`0` by default; `1` enables the
+  allowlisted Projects/Spaces, Artifact, file, Memory, and Scheduled Tasks
+  mutation methods)
+- `CLAUDE_REMOTE_CODE_ACTIONS` (`0` by default; `1` publishes the official
+  Code/LocalSessions surface, including terminal and workspace mutations)
+- `CLAUDE_EGRESS_ALLOWED_HOSTS_JSON` (optional JSON array; `["*"]` gives Cowork,
+  Code, and the plugin CLI unrestricted destinations subject to the NAS firewall)
+- `CLAUDE_COWORK_VM_MEMORY_GB` and `CLAUDE_COWORK_VM_CPU_COUNT` (production
+  defaults: `2` GiB and `1`; enforced at the Electron IPC boundary)
+- `CLAUDE_COWORK_VM_IDLE_MINUTES` and
+  `CLAUDE_COWORK_VM_SCHEDULE_GUARD_MINUTES` (production defaults: `30` and `10`)
+- `CLAUDE_DESKTOP_MEMORY_LIMIT` and `CLAUDE_COWORK_BRIDGE_MEMORY_LIMIT`
+  (production defaults: `3g` and `256m`)
 
-## 快速开始
+The base URL normally omits `/v1` when the Gateway serves
+`POST /v1/messages`. The model list must contain exact IDs accepted by the
+Gateway. This deployment currently declares `claude-opus-4-8` and
+`claude-opus-5` explicitly, so Claude Desktop does not need model discovery.
+
+Some Gateway providers accept requests only when they originate from the
+official Claude client. For those providers, a `curl` 401 is not a credential
+test. Validate inference through the official Desktop UI.
+
+The startup script merges `CLAUDE_EGRESS_ALLOWED_HOSTS_JSON` into the currently
+applied writable 3P configuration without replacing its Gateway credential or
+model fields. With `["*"]`, the official Egress Requirements page reports
+unrestricted tool egress and GitHub marketplaces can be cloned. Existing local
+marketplace clones remain in the persistent `/config` profile across restarts.
+After every provisioned marketplace is present, startup removes the one-shot
+`allowedPluginMarketplaces` list from the writable profile. This avoids the
+current Desktop build treating a duplicate `marketplace add` as a load failure;
+the official native marketplace registry remains persistent and authoritative.
+
+Then run:
 
 ```bash
-git clone https://github.com/ump45nose/Claudesk.git
-cd Claudesk
-
-cp .env.example .env
-mkdir -p data/config data/workspace
-```
-
-编辑 `.env`，至少填写：
-
-```dotenv
-CLAUDE_GATEWAY_BASE_URL=https://gateway.example.com
-CLAUDE_GATEWAY_API_KEY=replace-me
-CLAUDE_GATEWAY_AUTH_SCHEME=bearer
-CLAUDE_INFERENCE_MODELS_JSON='[{"name":"claude-opus-4-8","labelOverride":"Claude Opus 4.8","anthropicFamilyTier":"opus"},{"name":"claude-opus-5","labelOverride":"Claude Opus 5","anthropicFamilyTier":"opus","isFamilyDefault":true}]'
-```
-
-确认虚拟化设备并启动：
-
-```bash
-test -r /dev/kvm && test -w /dev/kvm
-test -r /dev/vhost-vsock && test -w /dev/vhost-vsock
-
 ./scripts/prepare-seccomp.sh
 docker compose build
 docker compose up -d
 ./scripts/smoke.sh
 ```
 
-默认入口：
+`prepare-seccomp.sh` verifies the SHA-256 of Moby's pinned release profile
+source before adding the narrowly scoped Chromium namespace rules and the
+single `socket(AF_VSOCK)` rule Cowork requires. Run it again when rebuilding
+this deployment on another host.
 
-| 入口 | 地址 | 用途 |
-| --- | --- | --- |
-| Remote Web Bridge | `http://nas.local:15821` | 官方 Chat/Cowork WebUI、PWA 后端和 Remote IPC API |
-| Desktop fallback | `http://nas.local:15820` | 临时浏览器桌面，仅用于排障 |
-
-直接端口没有内置鉴权，只应开放在可信 LAN/Tailnet。PWA 必须通过 HTTPS 安全来源安装。
-
-## 配置
-
-### 基础配置
-
-| 变量 | 默认值 | 说明 |
-| --- | --- | --- |
-| `WEB_PORT` | `15820` | Desktop fallback 端口 |
-| `COWORK_WEB_PORT` | `15821` | Remote Web Bridge 端口 |
-| `DESKTOP_BIND_ADDRESS` | `0.0.0.0` | Desktop fallback 绑定地址 |
-| `BRIDGE_BIND_ADDRESS` | `0.0.0.0` | Remote Web Bridge 绑定地址 |
-| `CLAUDE_CONFIG_DIR` | `./data/config` | Desktop 配置与会话持久化目录 |
-| `CLAUDE_WORKSPACE_DIR` | `./data/workspace` | Cowork/Code 工作区与远程上传目录 |
-| `CLAUDE_UPDATE_ON_START` | `1` | 启动时检查官方包更新 |
-| `CLAUDE_UPDATE_TIMEOUT_SECONDS` | `300` | APT 更新超时 |
-| `CLAUDE_GATEWAY_BASE_URL` | 必填 | Gateway origin，通常不含结尾 `/v1` |
-| `CLAUDE_GATEWAY_API_KEY` | 必填 | Gateway 凭据；不要提交到 Git |
-| `CLAUDE_GATEWAY_AUTH_SCHEME` | `bearer` | `bearer` 或 `x-api-key` |
-| `CLAUDE_INFERENCE_MODELS_JSON` | 必填 | Gateway 接受的 Claude 模型别名数组 |
-| `CLAUDE_EGRESS_ALLOWED_HOSTS_JSON` | 空 | Cowork/Code/plugin CLI 出站域名策略；`["*"]` 表示不限制目标域名 |
-
-模型名必须是 Gateway 实际接受的路由名。部分服务商只接受来自官方 Claude 客户端的请求，因此 `curl` 返回 401 并不能替代 Desktop 内的真实推理测试。
-
-### 高权限功能开关
-
-| 变量 | 默认值 | 开启的能力 |
-| --- | --- | --- |
-| `CLAUDE_REMOTE_GATEWAY_SETTINGS` | `0` | 官方第三方推理设置页及可写 `configLibrary` |
-| `CLAUDE_REMOTE_DEVELOPER_ACTIONS` | `0` | MCP 配置、Plugins、Skills、日志、trace/heap 与受限 Developer 操作 |
-| `CLAUDE_REMOTE_INFRASTRUCTURE_ACTIONS` | `0` | Projects/Spaces、Artifacts、文件、Memory、Scheduled Tasks 写操作 |
-| `CLAUDE_REMOTE_CODE_ACTIONS` | `0` | 官方 Code/LocalSessions、终端与 `/workspace` 文件变更 |
-| `COWORK_BRIDGE_ALLOW_DESTRUCTIVE` | `0` | 其余显式标记为 destructive 的桥接方法 |
-
-这些开关会扩大远程客户端权限。仅在 HTTPS + 强认证之后开启，并在完成设置后关闭不再需要的能力。
-
-## HTTPS、PWA 与 Authelia
-
-Claudesk 不内置用户认证，推荐让反向代理负责 TLS 和 AuthRequest。Nginx 代理至少需要关闭 SSE buffering：
-
-```nginx
-location / {
-    auth_request /authelia;
-
-    proxy_pass http://127.0.0.1:15821;
-    proxy_http_version 1.1;
-    proxy_set_header Host $host;
-    proxy_set_header X-Forwarded-Proto $scheme;
-    proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
-
-    proxy_buffering off;
-    proxy_cache off;
-    proxy_read_timeout 3600s;
-}
-```
-
-`/authelia` 的具体实现取决于你的反向代理布局。不要在接入认证后额外保留一个对公网可达的 `15821` 直连入口。
-
-## Chat、Cowork 与 Code
-
-Chat 与 Cowork 共用官方 `LocalAgentModeSessions`，但 Bridge 按 `sessionType` 隔离列表和写入路径。多个浏览器通过 SSE 接收标题、运行状态与 transcript 更新；断线时浏览器使用 HTTP snapshot 恢复。
-
-Code 是单独的高权限能力，默认关闭。启用后命令在 Desktop 容器内执行，默认工作根目录为持久化的 `/workspace`，不会在访问 WebUI 的手机或电脑上执行。仓库没有开放远程 SSH、cloud teleport、PR mutation 或任意主进程命令。
-
-浏览器附件先上传到 `/workspace/RemoteUploads`，再把 NAS 路径交给官方 API。`Reveal` 只能展示 NAS 工作区的只读目录视图，不能打开访问设备上的 Explorer/Finder。
-
-## 安全模型
-
-- Desktop adapter 固定监听 `127.0.0.1`，不发布到宿主机。
-- 外层 Bridge 与 Desktop adapter 都执行独立的方法、store、protocol path allowlist。
-- Gateway API Key 默认只进入 Desktop 容器，不进入浏览器 bootstrap。
-- JSON 响应若包含凭据字段名会被 Bridge 拒绝。
-- 文件读写限制在预设配置文件和 `/workspace` 根目录内，并拒绝路径穿越与符号链接逃逸。
-- Bridge 容器丢弃全部 Linux capabilities，启用 `no-new-privileges` 和只读根文件系统。
-- Desktop 容器不使用 `--privileged`、`CAP_SYS_ADMIN` 或 `seccomp=unconfined`。
-- 项目 seccomp profile 基于校验固定版本的 Moby 默认策略，只增加 Chromium user namespace 与 Cowork `AF_VSOCK` 所需规则。
-
-更多漏洞报告说明见 [SECURITY.md](SECURITY.md)。
-
-## 自动更新与兼容性
-
-容器启动时会：
-
-1. 刷新 Anthropic 签名 APT 仓库；
-2. 仅升级 `claude-desktop`；
-3. 根据新 `app.asar` 重新注入最小入口 wrapper；
-4. 从更新后的包读取官方 `ion-dist`。
-
-Claude Desktop 的内部 IPC 不是公开稳定 API。官方更新改变 package name、入口格式或 Gateway guard 时，Claudesk 会拒绝静默注入并返回明确错误，避免运行不完整或越权的兼容补丁。
-
-## 验证与排障
-
-```bash
-# 容器、官方包、设备和 Bridge 综合检查
-./scripts/smoke.sh
-
-# 只检查 Cowork read path
-./scripts/cowork-bridge-smoke.sh
-
-# 检查 Chat/Cowork 分类、模型和 runtime control
-./scripts/chat-bridge-smoke.sh
-```
-
-常用检查：
-
-```bash
-docker compose ps
-docker compose logs --tail=200 claude-desktop
-docker compose logs --tail=200 cowork-bridge
-curl -fsS http://127.0.0.1:15821/api/health | jq
-```
-
-不要在终端或 Issue 中粘贴 `.env`、完整 `docker compose config` 输出、Gateway API Key 或开发者配置文件。
-
-## 项目结构
+The services are published as ordinary Docker host-port bindings. Use either
+the NAS LAN address or its Tailscale interface address; no Tailscale
+Serve/Funnel configuration is involved:
 
 ```text
-.
-├── Dockerfile                       # 官方 Desktop、QEMU、virtiofsd 与注入工具
-├── compose.yaml                     # Desktop + Remote Web Bridge
-├── bridge/server.mjs                # 公网 Bridge、allowlist、SSE 与官方前端代理
-├── bridge/public/                   # Remote shim、PWA、菜单和移动端覆盖
-├── bridge-wrapper/                  # loopback Electron/main-process adapter
-├── rootfs/                          # 启动更新、配置与 app.asar 注入脚本
-├── scripts/                         # seccomp 生成和 smoke checks
-└── security/claude-desktop.json     # 生成并提交的容器 seccomp profile
+Desktop fallback:  http://192.168.31.201:15820/
+Cowork bridge:     http://192.168.31.201:15821/
+
+Desktop fallback:  http://100.102.63.126:15820/
+Cowork bridge:     http://100.102.63.126:15821/
+
+Official PWA:      https://claude-home.172906573.xyz:28443/
 ```
 
-## 已知限制
+For the HTTPS hostname to stay private and work over Tailscale, configure a
+split-DNS record for `claude-home.172906573.xyz` to the appropriate private NAS
+address. The HTTPS entry is authenticated by Authelia; the direct `15821` port
+does not inherit that authentication layer.
 
-- Cowork 依赖 KVM/QEMU 和较大的 VM 镜像，不适合没有硬件虚拟化或磁盘空间紧张的主机。
-- 官方 Desktop 的内部 IPC/前端结构可能随更新变化，需要持续兼容维护。
-- 直连端口没有应用层鉴权；远程使用必须自行部署 TLS 与认证。
-- 浏览器无法直接取得访问设备的本地文件路径，上传文件会复制到 NAS workspace。
-- PWA 的离线能力只用于壳层和已访问的内容哈希静态资源；推理与会话操作仍需要连接 NAS。
+Do not print `docker compose config` after adding the API key because rendered
+Compose output contains environment values.
 
-## 贡献
+## Persistent data
 
-提交 PR 前请运行：
+- `/vol2/1000/Docker/ClaudeDesktop/config`
+- `/vol2/1000/Docker/ClaudeDesktop/workspace`
 
-```bash
-node --check bridge/server.mjs
-node --check bridge-wrapper/main.cjs
-node --check bridge/public/remote-preload.js
-shellcheck rootfs/startapp.sh rootfs/etc/cont-init.d/*.sh scripts/*.sh
-jq -e . security/claude-desktop.json bridge/public/manifest.webmanifest
-```
+Stop Claude Desktop before taking a consistency-sensitive backup of its local
+session state.
+
+Cowork may use roughly 25 GB for its local VM image and working data. Monitor
+storage headroom before relying on long-running Cowork sessions.
 
 修改 IPC allowlist 时，请同步检查外层 Bridge 与 loopback adapter，说明为什么该方法需要远程暴露，并保持 destructive 能力默认关闭。
 

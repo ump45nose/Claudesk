@@ -1,7 +1,7 @@
 import http from "node:http";
 import { createHash, randomUUID } from "node:crypto";
 import { createReadStream } from "node:fs";
-import { mkdir, readFile, readdir, realpath, stat, writeFile } from "node:fs/promises";
+import { mkdir, readFile, readdir, stat, writeFile } from "node:fs/promises";
 import { basename, dirname, extname, normalize, resolve } from "node:path";
 import { Readable } from "node:stream";
 
@@ -63,6 +63,7 @@ const allowedMethods = new Map([
   ])],
   ["LocalAgentModeSessions", new Set([
     "archive",
+    "delete",
     "getAll",
     "getDefaultWorkspaceFolders",
     "getSession",
@@ -516,6 +517,9 @@ const infrastructureDestructiveMethods = new Set([
 const codeDestructiveMethods = new Set([
   "LocalSessions.delete",
 ]);
+const confirmedSessionDestructiveMethods = new Set([
+  "LocalAgentModeSessions.delete",
+]);
 
 const mimeTypes = {
   ".css": "text/css; charset=utf-8",
@@ -525,6 +529,7 @@ const mimeTypes = {
   ".jpeg": "image/jpeg",
   ".jpg": "image/jpeg",
   ".md": "text/markdown; charset=utf-8",
+  ".otf": "font/otf",
   ".pdf": "application/pdf",
   ".png": "image/png",
   ".svg": "image/svg+xml",
@@ -916,33 +921,6 @@ function resolveWorkspacePath(value, { allowRoot = true } = {}) {
   return filePath;
 }
 
-function assertPathWithinRoot(filePath, root, { allowRoot = true } = {}) {
-  if (
-    (!allowRoot && filePath === root)
-    || (filePath !== root && !filePath.startsWith(`${root}/`))
-  ) {
-    throw new ApiError(403, "workspace path resolves outside the remote workspace");
-  }
-  return filePath;
-}
-
-async function resolveExistingWorkspacePath(value, options = {}) {
-  const filePath = resolveWorkspacePath(value, options);
-  try {
-    const [realRoot, realFile] = await Promise.all([
-      realpath(workspaceRoot),
-      realpath(filePath),
-    ]);
-    return assertPathWithinRoot(realFile, realRoot, options);
-  } catch (error) {
-    if (error instanceof ApiError) throw error;
-    if (error?.code === "ENOENT" || error?.code === "ENOTDIR") {
-      throw new ApiError(404, "workspace path was not found");
-    }
-    throw error;
-  }
-}
-
 function validateUploadRelativePath(value) {
   if (typeof value !== "string" || !value || value.length > 2048) {
     throw new ApiError(400, "upload relative path is invalid");
@@ -972,14 +950,9 @@ async function receiveBrowserUpload(request) {
     throw new ApiError(400, "upload files must be a non-empty array");
   }
 
-  const realWorkspaceRoot = await realpath(workspaceRoot);
   const uploadsRoot = resolve(workspaceRoot, "RemoteUploads");
   await mkdir(uploadsRoot, { recursive: true });
-  const realUploadsRoot = assertPathWithinRoot(
-    await realpath(uploadsRoot),
-    realWorkspaceRoot,
-  );
-  const uploadRoot = resolve(realUploadsRoot, randomUUID());
+  const uploadRoot = resolve(uploadsRoot, randomUUID());
   await mkdir(uploadRoot, { recursive: false });
   const uploaded = [];
   let decodedBytes = 0;
@@ -1022,7 +995,7 @@ function htmlEscape(value) {
 }
 
 async function serveWorkspaceDirectory(response, requestedPath) {
-  const target = await resolveExistingWorkspacePath(requestedPath || workspaceRoot);
+  const target = resolveWorkspacePath(requestedPath || workspaceRoot);
   const info = await stat(target);
   const directory = info.isDirectory() ? target : dirname(target);
   const entries = (await readdir(directory, { withFileTypes: true }))
@@ -1181,7 +1154,16 @@ function validateInvocation(surface, method, args) {
     && infrastructureDestructiveMethods.has(`${surface}.${method}`);
   const codeDestructive = codeActionsEnabled
     && codeDestructiveMethods.has(`${surface}.${method}`);
-  if (!allowDestructive && !infrastructureDestructive && !codeDestructive && destructiveMethods.has(method)) {
+  const confirmedSessionDestructive = confirmedSessionDestructiveMethods.has(
+    `${surface}.${method}`,
+  );
+  if (
+    !allowDestructive
+    && !infrastructureDestructive
+    && !codeDestructive
+    && !confirmedSessionDestructive
+    && destructiveMethods.has(method)
+  ) {
     throw new ApiError(
       403,
       `${method} is disabled; set COWORK_BRIDGE_ALLOW_DESTRUCTIVE=1 to enable it`,
@@ -1293,10 +1275,7 @@ async function handleApi(request, response, url) {
   }
 
   if (request.method === "GET" && url.pathname === "/api/remote/files/download") {
-    const filePath = await resolveExistingWorkspacePath(
-      url.searchParams.get("path"),
-      { allowRoot: false },
-    );
+    const filePath = resolveWorkspacePath(url.searchParams.get("path"), { allowRoot: false });
     const info = await stat(filePath);
     if (!info.isFile()) throw new ApiError(404, "workspace file was not found");
     const name = basename(filePath).replace(/[\r\n"]/g, "_");
@@ -1326,12 +1305,28 @@ async function handleApi(request, response, url) {
     validateInvocation(body.surface, body.method, body.args ?? []);
     const startedAt = Date.now();
     try {
-      const value = await desktop.invoke(
+      let value = await desktop.invoke(
         body.surface,
         body.method,
         body.args ?? [],
         body.argsEncoding,
       );
+      if (
+        body.surface === "LocalAgentModeSessions"
+        && body.method === "getSession"
+        && value
+        && typeof value === "object"
+        && typeof value.sessionType !== "string"
+      ) {
+        const sessionId = body.args?.[0];
+        const sessions = await desktop.invoke("LocalAgentModeSessions", "getAll", []);
+        const listedSession = Array.isArray(sessions)
+          ? sessions.find((session) => (session?.sessionId ?? session?.id) === sessionId)
+          : undefined;
+        if (typeof listedSession?.sessionType === "string") {
+          value = { ...value, sessionType: listedSession.sessionType };
+        }
+      }
       if (body.surface === "FileSystem") {
         console.log(
           `[cowork-bridge] ipc ${body.surface}.${body.method} ok ${Date.now() - startedAt}ms`,
@@ -1492,9 +1487,6 @@ async function handleApi(request, response, url) {
         && surfaces?.ClaudeVM?.includes("getRunningStatus")
         && surfaces?.ClaudeVM?.includes("startVM")
       );
-      const chatActionsReady = Boolean(
-        surfaces?.LocalAgentModeSessions?.includes("rewind")
-      );
       sendJson(response, 200, {
         ok: true,
         transport: "official-renderer-ipc",
@@ -1503,12 +1495,9 @@ async function handleApi(request, response, url) {
           surfaces?.LocalAgentModeSessions?.includes("getAll")
           && runtimeControlReady
         ),
-        chatActionsReady,
         chatReady: Boolean(
           surfaces?.LocalAgentModeSessions?.includes("start")
           && surfaces?.LocalAgentModeSessions?.includes("sendMessage")
-          && chatActionsReady
-          && runtimeControlReady
         ),
         configuredModels,
         codeActionsEnabled,
@@ -1675,9 +1664,12 @@ async function serveStatic(response, pathname) {
   const info = await stat(filePath);
   if (!info.isFile()) throw new Error("not found");
   const body = await readFile(filePath);
+  const fileExtension = extname(filePath);
   response.writeHead(200, {
-    "Cache-Control": "no-store",
-    "Content-Type": mimeTypes[extname(filePath)] || "application/octet-stream",
+    "Cache-Control": fileExtension === ".otf"
+      ? "public, max-age=31536000, immutable"
+      : "no-store",
+    "Content-Type": mimeTypes[fileExtension] || "application/octet-stream",
     "Referrer-Policy": "no-referrer",
     "X-Content-Type-Options": "nosniff",
     "X-Frame-Options": "SAMEORIGIN",
@@ -1692,7 +1684,9 @@ async function serveOfficialAsset(response, pathname) {
   if (!upstream.ok) throw new ApiError(upstream.status, "official ion-dist asset not found");
   let body = Buffer.from(await upstream.arrayBuffer());
   let patchedGatewaySetup = false;
-  let patchedChatActions = false;
+  let patchedMessageActions = false;
+  let patchedCodeActions = false;
+  let patchedSessionMenus = false;
   if (
     gatewaySettingsEnabled
     && pathname.endsWith(".js")
@@ -1710,62 +1704,211 @@ async function serveOfficialAsset(response, pathname) {
     patchedGatewaySetup = true;
   }
   if (pathname.endsWith(".js")) {
-    const source = body.toString("utf8");
+    const actionVersion = "20260804-2";
     const retryGuard = 'function xF(){throw new Error("Cannot retry")}';
     const retryTarget = "onRetry:xF,changeDisplayedConversationPath:yF";
-    const editTarget = 'Ee=Mt("cowork_edit_message_button")';
+    const retryReplacement = 'onRetry:"chat"===F.sessionType?(e,t)=>"human_message_hover"===e||"assistant_message_footer"===e?zs(st.find(e=>e.uuid===t)):$s(e):xF,changeDisplayedConversationPath:yF';
+    const editFeatureTarget = 'Ee=Mt("cowork_edit_message_button")';
+    const rewindCapabilityTarget = "Ke=de?Re&&void 0!==J:!!Fs?.rewind";
+    const showEditTarget = "Je=Ee&&!de&&!Ye";
     const messageActionsImport = 'from"./shared-10-DEXHYEQf.js"';
     const messageActionsTarget = "z=P&&!p&&m&&u&&c&&!e.sendFailed&&!D&&(w?C&&i&&!_:!!e.parent_message_uuid)";
-    const retryReplacement = 'onRetry:"chat"===F.sessionType?(e,t)=>"human_message_hover"===e||"assistant_message_footer"===e?zs(st.find(e=>e.uuid===t)):$s(e):xF,changeDisplayedConversationPath:yF';
-    const hasChatActionsBundle = source.includes(retryGuard)
-      || source.includes(retryTarget)
-      || source.includes(editTarget);
-    if (hasChatActionsBundle) {
+    let source = body.toString("utf8");
+
+    if (source.includes(editFeatureTarget)) {
       for (const [label, marker] of [
         ["retry guard", retryGuard],
         ["retry callback", retryTarget],
-        ["edit feature gate", editTarget],
+        ["edit feature gate", editFeatureTarget],
+        ["rewind capability", rewindCapabilityTarget],
+        ["edit affordance gate", showEditTarget],
         ["message actions import", messageActionsImport],
       ]) {
         const first = source.indexOf(marker);
         if (first < 0 || source.indexOf(marker, first + marker.length) >= 0) {
           throw new ApiError(
             502,
-            `official Chat ${label} changed; refusing an incomplete compatibility patch`,
+            `official Cowork ${label} changed; refusing an incomplete compatibility patch`,
           );
         }
       }
-      body = Buffer.from(
-        source
-          .replace(retryTarget, retryReplacement)
-          .replace(editTarget, 'Ee="chat"===F.sessionType')
-          .replace(
-            messageActionsImport,
-            'from"./shared-10-DEXHYEQf.js?claudesk-chat-actions=20260802-3"',
-          ),
-        "utf8",
-      );
-      patchedChatActions = true;
+      source = source
+        .replace(retryTarget, retryReplacement)
+        .replace(editFeatureTarget, "Ee=true")
+        .replace(rewindCapabilityTarget, "Ke=Ee||(de?Re&&void 0!==J:!!Fs?.rewind)")
+        .replace(showEditTarget, "Je=Ee&&!Ye")
+        .replace(
+          messageActionsImport,
+          `from"./shared-10-DEXHYEQf.js?claudesk-edit-actions=${actionVersion}"`,
+        );
+      patchedMessageActions = true;
     } else if (source.includes(messageActionsTarget)) {
       const first = source.indexOf(messageActionsTarget);
       if (source.indexOf(messageActionsTarget, first + messageActionsTarget.length) >= 0) {
         throw new ApiError(
           502,
-          "official Chat message edit condition changed; refusing an ambiguous compatibility patch",
+          "official sent-message edit condition changed; refusing an ambiguous compatibility patch",
         );
       }
-      body = Buffer.from(
-        source.replace(
-          messageActionsTarget,
-          "z=P&&!p&&m&&u&&c&&!e.sendFailed&&!D&&(w?(!C||i)&&!_:!!e.parent_message_uuid)",
-        ),
-        "utf8",
+      source = source.replace(
+        messageActionsTarget,
+        "z=P&&!p&&m&&u&&c&&!e.sendFailed&&!D&&(w?(!C||i)&&!_:!!e.parent_message_uuid)",
       );
-      patchedChatActions = true;
+      patchedMessageActions = true;
+    }
+
+    const codeRouteTarget = 'import("./cd377abb5-CvQ3GXS3.js")';
+    const codeSessionImport = 'from"./c5610fbe3-Bao3nWiP.js"';
+    const codeSharedImport = 'from"./c360a9e1c-DrYIyI47.js"';
+    const codeEditTarget = 'icon:"ArrowUndoUp",disabled:void 0!==s,"aria-label":n.formatMessage({defaultMessage:"Rewind to here",id:"jlXY1qCwxf"})';
+
+    if (source.includes(codeRouteTarget)) {
+      const first = source.indexOf(codeRouteTarget);
+      if (source.indexOf(codeRouteTarget, first + codeRouteTarget.length) >= 0) {
+        throw new ApiError(
+          502,
+          "official Code route import changed; refusing an ambiguous compatibility patch",
+        );
+      }
+      source = source.replace(
+        codeRouteTarget,
+        `import("./cd377abb5-CvQ3GXS3.js?claudesk-code-actions=${actionVersion}")`,
+      );
+      patchedCodeActions = true;
+    }
+
+    if (source.includes(codeSessionImport)) {
+      const first = source.indexOf(codeSessionImport);
+      if (source.indexOf(codeSessionImport, first + codeSessionImport.length) >= 0) {
+        throw new ApiError(
+          502,
+          "official Code session import changed; refusing an ambiguous compatibility patch",
+        );
+      }
+      source = source.replace(
+        codeSessionImport,
+        `from"./c5610fbe3-Bao3nWiP.js?claudesk-code-actions=${actionVersion}"`,
+      );
+      if (source.includes(codeSharedImport)) {
+        const sharedFirst = source.indexOf(codeSharedImport);
+        if (source.indexOf(codeSharedImport, sharedFirst + codeSharedImport.length) >= 0) {
+          throw new ApiError(
+            502,
+            "official Code shared import changed; refusing an ambiguous compatibility patch",
+          );
+        }
+        source = source.replace(
+          codeSharedImport,
+          `from"./c360a9e1c-DrYIyI47.js?claudesk-code-actions=${actionVersion}"`,
+        );
+      }
+      patchedCodeActions = true;
+    } else if (source.includes(codeSharedImport) && source.includes("rewindV2")) {
+      const first = source.indexOf(codeSharedImport);
+      if (source.indexOf(codeSharedImport, first + codeSharedImport.length) >= 0) {
+        throw new ApiError(
+          502,
+          "official Code rewind shared import changed; refusing an ambiguous compatibility patch",
+        );
+      }
+      source = source.replace(
+        codeSharedImport,
+        `from"./c360a9e1c-DrYIyI47.js?claudesk-code-actions=${actionVersion}"`,
+      );
+      patchedCodeActions = true;
+    }
+
+    if (source.includes(codeEditTarget)) {
+      const first = source.indexOf(codeEditTarget);
+      if (source.indexOf(codeEditTarget, first + codeEditTarget.length) >= 0) {
+        throw new ApiError(
+          502,
+          "official Code rewind button changed; refusing an ambiguous compatibility patch",
+        );
+      }
+      source = source.replace(
+        codeEditTarget,
+        'icon:"Edit","data-testid":"code-action-bar-edit",disabled:void 0!==s,"aria-label":n.formatMessage({defaultMessage:"Edit",id:"wEQDC6Wv3/"})',
+      );
+      patchedCodeActions = true;
+    }
+
+    const sessionMenuVersion = "20260804-2";
+    const sessionMenuImport = 'from"./shared-12-kUZ_jZyi.js"';
+    const sessionSidebarImport = 'from"./shared-17-YFu3JFq7.js"';
+    const chatArchiveTarget = "onArchive:E||T?void 0:N";
+    const deleteCapabilityTarget = "O=m&&l?async()=>";
+    const projectCapabilityTarget = "B=Boolean(!f&&m&&(A?F?q||P&&z:P||q:P&&(!F||z)))";
+    if (source.includes(sessionSidebarImport) && source.includes(sessionMenuImport)) {
+      for (const [label, marker] of [
+        ["sidebar import", sessionSidebarImport],
+        ["menu import", sessionMenuImport],
+      ]) {
+        const first = source.indexOf(marker);
+        if (source.indexOf(marker, first + marker.length) >= 0) {
+          throw new ApiError(
+            502,
+            `official session ${label} changed; refusing an ambiguous compatibility patch`,
+          );
+        }
+      }
+      source = source
+        .replace(
+          sessionSidebarImport,
+          `from"./shared-17-YFu3JFq7.js?claudesk-session-menus=${sessionMenuVersion}"`,
+        )
+        .replace(
+          sessionMenuImport,
+          `from"./shared-12-kUZ_jZyi.js?claudesk-session-menus=${sessionMenuVersion}"`,
+        );
+      patchedSessionMenus = true;
+    }
+
+    if (source.includes(chatArchiveTarget) || source.includes(deleteCapabilityTarget)) {
+      for (const [label, marker] of [
+        ["Chat archive gate", chatArchiveTarget],
+        ["delete capability gate", deleteCapabilityTarget],
+        ["menu import", sessionMenuImport],
+      ]) {
+        const first = source.indexOf(marker);
+        if (first < 0 || source.indexOf(marker, first + marker.length) >= 0) {
+          throw new ApiError(
+            502,
+            `official session ${label} changed; refusing an incomplete compatibility patch`,
+          );
+        }
+      }
+      source = source
+        .replace(chatArchiveTarget, "onArchive:T?void 0:N")
+        .replace(deleteCapabilityTarget, "O=m?async()=>")
+        .replace(
+          sessionMenuImport,
+          `from"./shared-12-kUZ_jZyi.js?claudesk-session-menus=${sessionMenuVersion}"`,
+        );
+      patchedSessionMenus = true;
+    }
+
+    if (source.includes(projectCapabilityTarget)) {
+      const first = source.indexOf(projectCapabilityTarget);
+      if (source.indexOf(projectCapabilityTarget, first + projectCapabilityTarget.length) >= 0) {
+        throw new ApiError(
+          502,
+          "official Cowork project capability gate changed; refusing an ambiguous compatibility patch",
+        );
+      }
+      source = source.replace(
+        projectCapabilityTarget,
+        "B=Boolean(!f&&m&&(!F||(A?F?q||P&&z:P||q:P&&(!F||z))))",
+      );
+      patchedSessionMenus = true;
+    }
+
+    if (patchedMessageActions || patchedCodeActions || patchedSessionMenus) {
+      body = Buffer.from(source, "utf8");
     }
   }
   response.writeHead(200, {
-    "Cache-Control": patchedGatewaySetup || patchedChatActions
+    "Cache-Control": patchedGatewaySetup || patchedMessageActions || patchedCodeActions || patchedSessionMenus
       ? "no-store"
       : pathname === "/frame-shell.html"
       ? "no-store"
@@ -1796,6 +1939,20 @@ async function initialRemoteStores() {
   return Object.fromEntries(entries);
 }
 
+async function initialChatSessionIds() {
+  try {
+    const sessions = await desktop.invoke("LocalAgentModeSessions", "getAll", []);
+    return Array.isArray(sessions)
+      ? sessions
+        .filter(isChatSession)
+        .map((session) => session.sessionId)
+        .filter((sessionId) => typeof sessionId === "string")
+      : [];
+  } catch {
+    return [];
+  }
+}
+
 function htmlSafeJson(value) {
   return JSON.stringify(value)
     .replaceAll("<", "\\u003c")
@@ -1808,6 +1965,7 @@ async function serveOfficialIndex(response) {
   if (!upstream.ok) throw new ApiError(502, "official ion-dist entry is unavailable");
   const config = {
     configuredModels,
+    chatSessionIds: await initialChatSessionIds(),
     desktopBootFeatures: await desktop.bootFeatures(),
     desktopRuntime: await desktop.runtime(),
     codeActionsEnabled,
@@ -1835,16 +1993,17 @@ async function serveOfficialIndex(response) {
   };
   const bootstrapInjection = [
     '<link rel="manifest" href="/manifest.webmanifest?v=20260802-2">',
+    '<link rel="preload" href="/fonts/AnthropicSerif-Text-Regular-CJK.otf?v=20260803-1" as="font" type="font/otf" crossorigin>',
     '<meta name="theme-color" content="#f7f6f2">',
     `<script>globalThis.__CLAUDE_REMOTE_BOOTSTRAP__=${htmlSafeJson(config)}</script>`,
     '<script src="/remote-main-menu.js?v=20260801-4"></script>',
-    '<script src="/remote-preload.js?v=20260802-18"></script>',
+    '<script src="/remote-preload.js?v=20260804-2"></script>',
   ].join("");
   // The official entry lists its CSS after the module script. Put our narrow
   // remote overrides at the very end of <head>, otherwise the official button
   // sizing rules win in the mobile composer.
   const overrideStyles = [
-    '<link rel="stylesheet" href="/remote-shell.css?v=20260802-9">',
+    '<link rel="stylesheet" href="/remote-shell.css?v=20260804-1">',
     '<link rel="stylesheet" href="/remote-main-menu.css?v=20260801-2">',
   ].join("");
   let html = await upstream.text();
@@ -1853,16 +2012,16 @@ async function serveOfficialIndex(response) {
     .replace('<script type="module"', `${bootstrapInjection}<script type="module"`)
     .replace(
       /(<script type="module"[^>]*\bsrc="[^"]+\.js)(")/,
-      "$1?claudesk-chat-actions=20260802-3$2",
+      "$1?claudesk-session-menus=20260804-2$2",
     )
     .replace("</head>", `${overrideStyles}</head>`);
   if (!html.includes("__CLAUDE_REMOTE_BOOTSTRAP__")) {
     throw new ApiError(502, "official ion-dist entry format changed; refusing an unshimmed page");
   }
-  if (!html.includes("?claudesk-chat-actions=20260802-3")) {
+  if (!html.includes("?claudesk-session-menus=20260804-2")) {
     throw new ApiError(
       502,
-      "official ion-dist module entry changed; refusing an unpatched Chat entry",
+      "official ion-dist module entry changed; refusing an unpatched session menu entry",
     );
   }
   const body = Buffer.from(html, "utf8");
@@ -1878,6 +2037,7 @@ async function serveOfficialIndex(response) {
 }
 
 const localStaticFiles = new Set([
+  "/fonts/AnthropicSerif-Text-Regular-CJK.otf",
   "/manifest.webmanifest",
   "/remote-developer.css",
   "/remote-developer.html",
