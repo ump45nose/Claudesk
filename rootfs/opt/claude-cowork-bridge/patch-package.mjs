@@ -15,8 +15,6 @@ packageJson.main = "bridge-wrapper/loader.cjs";
 
 await writeFile(packagePath, `${JSON.stringify(packageJson, null, 2)}\n`, "utf8");
 
-if (process.env.CLAUDE_COWORK_HOST_BASH !== "1") process.exit(0);
-
 const buildDir = join(dirname(packagePath), ".vite", "build");
 const buildFiles = (await readdir(buildDir))
   .filter((name) => name.startsWith("index.chunk-") && name.endsWith(".js"));
@@ -42,6 +40,18 @@ async function findChunk(label, requiredText) {
   }
   return matches[0];
 }
+
+const chatRewindGuard = 'if(s.sessionType)return o.logger.warn(`[Rewind] Rejected for session ${e} — sessionType=${s.sessionType} not supported`),null;';
+const rewindChunk = await findChunk("Chat rewind guard", [chatRewindGuard]);
+const rewindSource = replaceOnce(
+  rewindChunk.source,
+  chatRewindGuard,
+  `if(s.sessionType&&s.sessionType!=="chat")${chatRewindGuard.slice("if(s.sessionType)".length)}`,
+  "Chat rewind guard",
+);
+await writeFile(rewindChunk.path, rewindSource, "utf8");
+
+if (process.env.CLAUDE_COWORK_HOST_BASH !== "1") process.exit(0);
 
 const hostBashHelperAnchor = 'function Xe(e){return{content:[{type:"text",text:e}]}}';
 const hostBashHelper = `${hostBashHelperAnchor}function claudeCoworkHostBashEnv(){const e={};for(const o of["PATH","HOME","USER","LOGNAME","SHELL","TERM","TZ","LANG","LC_ALL","TMPDIR","NODE_EXTRA_CA_CERTS","NODE_USE_SYSTEM_CA"])typeof process.env[o]==="string"&&(e[o]=process.env[o]);return e.PATH||(e.PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"),e.HOME||(e.HOME="/config"),e.SHELL="/bin/bash",e.TMPDIR="/tmp",e}function claudeCoworkRunHostBash(e,o,n,r){return new Promise((a,i)=>{if(r!=null&&r.aborted){i(new Error("Cancelled."));return}let s="",m=!1;const h=gt.spawn("/bin/bash",["-lc",e],{cwd:o,env:claudeCoworkHostBashEnv(),stdio:["ignore","pipe","pipe"],windowsHide:!0}),p=()=>{m||(m=!0,clearTimeout(f),r==null||r.removeEventListener("abort",g))},y=l=>{if(m)return;s+=l.toString("utf8"),Buffer.byteLength(s,"utf8")>ne&&(h.kill("SIGKILL"),p(),i(new Error("Command output exceeded 1 MB")))},g=()=>{h.kill("SIGTERM"),p(),i(new Error("Cancelled."))},f=setTimeout(()=>{h.kill("SIGKILL"),p(),i(new Error(\`Command timed out after \${n}ms\`))},n);h.stdout.on("data",y),h.stderr.on("data",y),h.once("error",l=>{p(),i(l)}),h.once("close",(l,w)=>{m||(p(),a({exitCode:Number.isInteger(l)?l:w?128:1,output:s}))}),r==null||r.addEventListener("abort",g,{once:!0})})}`;

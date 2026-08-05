@@ -1701,6 +1701,7 @@ async function serveOfficialAsset(response, pathname) {
   let patchedMessageActions = false;
   let patchedCodeActions = false;
   let patchedSessionMenus = false;
+  let patchedToastTimeout = false;
   if (
     gatewaySettingsEnabled
     && pathname.endsWith(".js")
@@ -1718,7 +1719,7 @@ async function serveOfficialAsset(response, pathname) {
     patchedGatewaySetup = true;
   }
   if (pathname.endsWith(".js")) {
-    const actionVersion = "20260804-2";
+    const actionVersion = "20260805-1";
     const retryGuard = 'function xF(){throw new Error("Cannot retry")}';
     const retryTarget = "onRetry:xF,changeDisplayedConversationPath:yF";
     const retryReplacement = 'onRetry:"chat"===F.sessionType?(e,t)=>"human_message_hover"===e||"assistant_message_footer"===e?zs(st.find(e=>e.uuid===t)):$s(e):xF,changeDisplayedConversationPath:yF';
@@ -1728,6 +1729,43 @@ async function serveOfficialAsset(response, pathname) {
     const messageActionsImport = 'from"./shared-10-DEXHYEQf.js"';
     const messageActionsTarget = "z=P&&!p&&m&&u&&c&&!e.sendFailed&&!D&&(w?C&&i&&!_:!!e.parent_message_uuid)";
     let source = body.toString("utf8");
+
+    const toastVersion = "20260805-1";
+    const toastImportTarget = 'from"./shared-1-3-6x7RKF.js"';
+    const toastTimeoutTargets = [
+      'a(e=>[...e,{id:s,message:d,toastType:"warning",uniqueKey:u,duration:r,details:""}])',
+      'a(e=>[...e,{id:s,message:l,toastType:"warning",duration:r,details:""}])',
+      'a(t=>[...t,{id:s,message:e,toastType:"info",uniqueKey:o,duration:r}])',
+      'a(t=>[...t,{id:s,message:e,toastType:"warning",uniqueKey:o,duration:r}])',
+      'a(t=>[...t,{id:s,message:e,toastType:"danger",uniqueKey:o,duration:r}])',
+    ];
+
+    if (source.includes(toastImportTarget)) {
+      const first = source.indexOf(toastImportTarget);
+      if (source.indexOf(toastImportTarget, first + toastImportTarget.length) >= 0) {
+        throw new ApiError(
+          502,
+          "official Toast provider import changed; refusing an ambiguous compatibility patch",
+        );
+      }
+      source = source.replace(
+        toastImportTarget,
+        `from"./shared-1-3-6x7RKF.js?claudesk-toast-timeout=${toastVersion}"`,
+      );
+      patchedToastTimeout = true;
+    } else if (source.includes(toastTimeoutTargets[0])) {
+      for (const target of toastTimeoutTargets) {
+        const first = source.indexOf(target);
+        if (first < 0 || source.indexOf(target, first + target.length) >= 0) {
+          throw new ApiError(
+            502,
+            "official Toast provider changed; refusing an incomplete compatibility patch",
+          );
+        }
+        source = source.replace(target, target.replace("duration:r", "duration:r??6e3"));
+      }
+      patchedToastTimeout = true;
+    }
 
     if (source.includes(editFeatureTarget)) {
       for (const [label, marker] of [
@@ -1917,12 +1955,12 @@ async function serveOfficialAsset(response, pathname) {
       patchedSessionMenus = true;
     }
 
-    if (patchedMessageActions || patchedCodeActions || patchedSessionMenus) {
+    if (patchedMessageActions || patchedCodeActions || patchedSessionMenus || patchedToastTimeout) {
       body = Buffer.from(source, "utf8");
     }
   }
   response.writeHead(200, {
-    "Cache-Control": patchedGatewaySetup || patchedMessageActions || patchedCodeActions || patchedSessionMenus
+    "Cache-Control": patchedGatewaySetup || patchedMessageActions || patchedCodeActions || patchedSessionMenus || patchedToastTimeout
       ? "no-store"
       : pathname === "/frame-shell.html"
       ? "no-store"
