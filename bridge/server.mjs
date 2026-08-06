@@ -1730,40 +1730,27 @@ async function serveOfficialAsset(response, pathname) {
     const messageActionsTarget = "z=P&&!p&&m&&u&&c&&!e.sendFailed&&!D&&(w?C&&i&&!_:!!e.parent_message_uuid)";
     let source = body.toString("utf8");
 
-    const toastVersion = "20260805-1";
-    const toastImportTarget = 'from"./shared-1-3-6x7RKF.js"';
-    const toastTimeoutTargets = [
-      'a(e=>[...e,{id:s,message:d,toastType:"warning",uniqueKey:u,duration:r,details:""}])',
-      'a(e=>[...e,{id:s,message:l,toastType:"warning",duration:r,details:""}])',
-      'a(t=>[...t,{id:s,message:e,toastType:"info",uniqueKey:o,duration:r}])',
-      'a(t=>[...t,{id:s,message:e,toastType:"warning",uniqueKey:o,duration:r}])',
-      'a(t=>[...t,{id:s,message:e,toastType:"danger",uniqueKey:o,duration:r}])',
-    ];
-
-    if (source.includes(toastImportTarget)) {
-      const first = source.indexOf(toastImportTarget);
-      if (source.indexOf(toastImportTarget, first + toastImportTarget.length) >= 0) {
-        throw new ApiError(
-          502,
-          "official Toast provider import changed; refusing an ambiguous compatibility patch",
-        );
-      }
-      source = source.replace(
-        toastImportTarget,
-        `from"./shared-1-3-6x7RKF.js?claudesk-toast-timeout=${toastVersion}"`,
-      );
-      patchedToastTimeout = true;
-    } else if (source.includes(toastTimeoutTargets[0])) {
-      for (const target of toastTimeoutTargets) {
+    const legacyToastDurationTarget = 'a=e.toast.duration??("info"===e.toast.toastType?void 0:1/0)';
+    const cdsToastDurationTarget = 'timeout:void 0!==a.duration?Number.isFinite(a.duration)?a.duration:0:"info"===a.toastType?void 0:0';
+    if (source.includes(legacyToastDurationTarget) || source.includes(cdsToastDurationTarget)) {
+      for (const [label, target] of [
+        ["legacy Toast duration", legacyToastDurationTarget],
+        ["CDS Toast duration", cdsToastDurationTarget],
+      ]) {
         const first = source.indexOf(target);
         if (first < 0 || source.indexOf(target, first + target.length) >= 0) {
           throw new ApiError(
             502,
-            "official Toast provider changed; refusing an incomplete compatibility patch",
+            `official ${label} changed; refusing an incomplete compatibility patch`,
           );
         }
-        source = source.replace(target, target.replace("duration:r", "duration:r??6e3"));
       }
+      source = source
+        .replace(legacyToastDurationTarget, "a=e.toast.duration??6e3")
+        .replace(
+          cdsToastDurationTarget,
+          "timeout:void 0!==a.duration?Number.isFinite(a.duration)?a.duration:0:6e3",
+        );
       patchedToastTimeout = true;
     }
 
@@ -2064,16 +2051,16 @@ async function serveOfficialIndex(response) {
     .replace('<script type="module"', `${bootstrapInjection}<script type="module"`)
     .replace(
       /(<script type="module"[^>]*\bsrc="[^"]+\.js)(")/,
-      "$1?claudesk-session-menus=20260804-2$2",
+      "$1?claudesk-entry=20260806-1$2",
     )
     .replace("</head>", `${overrideStyles}</head>`);
   if (!html.includes("__CLAUDE_REMOTE_BOOTSTRAP__")) {
     throw new ApiError(502, "official ion-dist entry format changed; refusing an unshimmed page");
   }
-  if (!html.includes("?claudesk-session-menus=20260804-2")) {
+  if (!html.includes("?claudesk-entry=20260806-1")) {
     throw new ApiError(
       502,
-      "official ion-dist module entry changed; refusing an unpatched session menu entry",
+      "official ion-dist module entry changed; refusing an unpatched compatibility entry",
     );
   }
   const body = Buffer.from(html, "utf8");

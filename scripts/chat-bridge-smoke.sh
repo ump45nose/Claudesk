@@ -43,8 +43,13 @@ grep -F 'from"./shared-12-kUZ_jZyi.js?claudesk-session-menus=20260804-2"' \
   "$tmp_dir/entry.js" >/dev/null
 grep -F 'import("./cd377abb5-CvQ3GXS3.js?claudesk-code-actions=20260805-1")' \
   "$tmp_dir/entry.js" >/dev/null
-grep -F 'from"./shared-1-3-6x7RKF.js?claudesk-toast-timeout=20260805-1"' \
+grep -F 'a=e.toast.duration??6e3' "$tmp_dir/entry.js" >/dev/null
+grep -F 'timeout:void 0!==a.duration?Number.isFinite(a.duration)?a.duration:0:6e3' \
   "$tmp_dir/entry.js" >/dev/null
+if grep -F 'shared-1-3-6x7RKF.js?claudesk-toast-timeout=' "$tmp_dir/entry.js" >/dev/null; then
+  printf '%s\n' 'chat smoke: Toast patch still duplicates the ErrorsProvider module' >&2
+  exit 1
+fi
 if grep -F 'onRetry:xF,changeDisplayedConversationPath:yF' "$tmp_dir/entry.js" >/dev/null; then
   printf '%s\n' 'chat smoke: official retry callback was not patched' >&2
   exit 1
@@ -100,11 +105,6 @@ if grep -F 'icon:"ArrowUndoUp",disabled:void 0!==s,"aria-label":n.formatMessage(
   exit 1
 fi
 node --check "$tmp_dir/code-actions.js"
-curl -fsS \
-  "$base_url/assets/v1/shared-1-3-6x7RKF.js?claudesk-toast-timeout=20260805-1" \
-  > "$tmp_dir/toast-provider.js"
-[ "$(grep -oF 'duration:r??6e3' "$tmp_dir/toast-provider.js" | wc -l)" -eq 5 ]
-node --check "$tmp_dir/toast-provider.js"
 for method in isHostLoopModeEnabled getDownloadStatus getRunningStatus; do
   curl -fsS \
     -H 'Content-Type: application/json' \
