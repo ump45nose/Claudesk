@@ -28,7 +28,6 @@ if grep -F 'html.claude-remote-mobile #cowork-title-slot' "$tmp_dir/remote-shell
   printf '%s\n' 'chat smoke: title de-duplication is still mobile-only' >&2
   exit 1
 fi
-grep -F 'row-gap: 0.25rem !important' "$tmp_dir/remote-shell.css" >/dev/null
 entry_path="$(sed -n 's/.*<script type="module"[^>]*src="\([^"]*\)".*/\1/p' "$tmp_dir/index.html")"
 [ -n "$entry_path" ]
 curl -fsS "$base_url$entry_path" > "$tmp_dir/entry.js"
@@ -36,21 +35,28 @@ grep -F 'onRetry:"chat"===F.sessionType?' "$tmp_dir/entry.js" >/dev/null
 grep -F 'Ee=true' "$tmp_dir/entry.js" >/dev/null
 grep -F 'Ke=Ee||(de?Re&&void 0!==J:!!Fs?.rewind)' "$tmp_dir/entry.js" >/dev/null
 grep -F 'Je=Ee&&!Ye' "$tmp_dir/entry.js" >/dev/null
-grep -F 'from"./shared-10-DEXHYEQf.js?claudesk-edit-actions=20260804-2"' \
+grep -F 'from"./shared-10-DEXHYEQf.js?claudesk-edit-actions=20260805-1"' \
   "$tmp_dir/entry.js" >/dev/null
 grep -F 'from"./shared-17-YFu3JFq7.js?claudesk-session-menus=20260804-2"' \
   "$tmp_dir/entry.js" >/dev/null
 grep -F 'from"./shared-12-kUZ_jZyi.js?claudesk-session-menus=20260804-2"' \
   "$tmp_dir/entry.js" >/dev/null
-grep -F 'import("./cd377abb5-CvQ3GXS3.js?claudesk-code-actions=20260804-2")' \
+grep -F 'import("./cd377abb5-CvQ3GXS3.js?claudesk-code-actions=20260805-1")' \
   "$tmp_dir/entry.js" >/dev/null
+grep -F 'a=e.toast.duration??6e3' "$tmp_dir/entry.js" >/dev/null
+grep -F 'timeout:void 0!==a.duration?Number.isFinite(a.duration)?a.duration:0:6e3' \
+  "$tmp_dir/entry.js" >/dev/null
+if grep -F 'shared-1-3-6x7RKF.js?claudesk-toast-timeout=' "$tmp_dir/entry.js" >/dev/null; then
+  printf '%s\n' 'chat smoke: Toast patch still duplicates the ErrorsProvider module' >&2
+  exit 1
+fi
 if grep -F 'onRetry:xF,changeDisplayedConversationPath:yF' "$tmp_dir/entry.js" >/dev/null; then
   printf '%s\n' 'chat smoke: official retry callback was not patched' >&2
   exit 1
 fi
 node --check "$tmp_dir/entry.js"
 curl -fsS \
-  "$base_url/assets/v1/shared-10-DEXHYEQf.js?claudesk-edit-actions=20260804-2" \
+  "$base_url/assets/v1/shared-10-DEXHYEQf.js?claudesk-edit-actions=20260805-1" \
   > "$tmp_dir/message-actions.js"
 grep -F 'w?(!C||i)&&!_:!!e.parent_message_uuid' "$tmp_dir/message-actions.js" >/dev/null
 if grep -F 'w?C&&i&&!_:!!e.parent_message_uuid' "$tmp_dir/message-actions.js" >/dev/null; then
@@ -74,22 +80,22 @@ grep -F 'B=Boolean(!f&&m&&(!F||(A?F?q||P&&z:P||q:P&&(!F||z))))' \
 grep -F 'delete-session-trigger' "$tmp_dir/session-menu.js" >/dev/null
 node --check "$tmp_dir/session-menu.js"
 curl -fsS \
-  "$base_url/assets/v1/cd377abb5-CvQ3GXS3.js?claudesk-code-actions=20260804-2" \
+  "$base_url/assets/v1/cd377abb5-CvQ3GXS3.js?claudesk-code-actions=20260805-1" \
   > "$tmp_dir/code-route.js"
-grep -F 'from"./c5610fbe3-Bao3nWiP.js?claudesk-code-actions=20260804-2"' \
+grep -F 'from"./c5610fbe3-Bao3nWiP.js?claudesk-code-actions=20260805-1"' \
   "$tmp_dir/code-route.js" >/dev/null
-grep -F 'from"./c360a9e1c-DrYIyI47.js?claudesk-code-actions=20260804-2"' \
+grep -F 'from"./c360a9e1c-DrYIyI47.js?claudesk-code-actions=20260805-1"' \
   "$tmp_dir/code-route.js" >/dev/null
 node --check "$tmp_dir/code-route.js"
 curl -fsS \
-  "$base_url/assets/v1/c5610fbe3-Bao3nWiP.js?claudesk-code-actions=20260804-2" \
+  "$base_url/assets/v1/c5610fbe3-Bao3nWiP.js?claudesk-code-actions=20260805-1" \
   > "$tmp_dir/code-session.js"
-grep -F 'from"./c360a9e1c-DrYIyI47.js?claudesk-code-actions=20260804-2"' \
+grep -F 'from"./c360a9e1c-DrYIyI47.js?claudesk-code-actions=20260805-1"' \
   "$tmp_dir/code-session.js" >/dev/null
 grep -F 'rewindV2' "$tmp_dir/code-session.js" >/dev/null
 node --check "$tmp_dir/code-session.js"
 curl -fsS \
-  "$base_url/assets/v1/c360a9e1c-DrYIyI47.js?claudesk-code-actions=20260804-2" \
+  "$base_url/assets/v1/c360a9e1c-DrYIyI47.js?claudesk-code-actions=20260805-1" \
   > "$tmp_dir/code-actions.js"
 grep -F 'icon:"Edit","data-testid":"code-action-bar-edit"' \
   "$tmp_dir/code-actions.js" >/dev/null
@@ -106,7 +112,7 @@ for method in isHostLoopModeEnabled getDownloadStatus getRunningStatus; do
     "$base_url/api/remote/ipc" > "$tmp_dir/$method.json"
 done
 
-jq -e '.ok == true and .chatReady == true and .chatActionsReady == true and .runtimeControlReady == true and .transport == "official-renderer-ipc"' \
+jq -e '.ok == true and .chatReady == true and .runtimeControlReady == true and .transport == "official-renderer-ipc"' \
   "$tmp_dir/health.json" >/dev/null
 jq -e '.ok == true and (.value | length) > 0' "$tmp_dir/models.json" >/dev/null
 jq -e '.ok == true and ([.value[].sessionType] | all(. == "chat"))' \

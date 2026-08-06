@@ -17,6 +17,7 @@ const developerActionsEnabled = process.env.CLAUDE_REMOTE_DEVELOPER_ACTIONS === 
 const infrastructureActionsEnabled =
   process.env.CLAUDE_REMOTE_INFRASTRUCTURE_ACTIONS === "1";
 const codeActionsEnabled = process.env.CLAUDE_REMOTE_CODE_ACTIONS === "1";
+const coworkHostBashEnabled = process.env.CLAUDE_COWORK_HOST_BASH === "1";
 
 function boundedInteger(value, fallback, minimum, maximum) {
   const parsed = Number(value);
@@ -61,6 +62,9 @@ ipcMain.handle = (channel, listener) => {
     return originalIpcMainHandle(channel, listener);
   }
   if (channel.endsWith("_$_ClaudeVM_$_startVM")) {
+    if (coworkHostBashEnabled) {
+      return originalIpcMainHandle(channel, async () => undefined);
+    }
     return originalIpcMainHandle(channel, (event, config) => {
       noteCoworkVmActivity();
       const safeConfig = config && typeof config === "object" && !Array.isArray(config)
@@ -68,6 +72,9 @@ ipcMain.handle = (channel, listener) => {
         : {};
       return listener(event, { ...safeConfig, memoryGB: coworkVmMemoryGB });
     });
+  }
+  if (coworkHostBashEnabled && channel.endsWith("_$_ClaudeVM_$_getRunningStatus")) {
+    return originalIpcMainHandle(channel, async () => "ready");
   }
   if (channel.endsWith("_$_ClaudeVM_$_setYukonSilverConfig")) {
     return originalIpcMainHandle(channel, (event, config) => {
@@ -1718,6 +1725,7 @@ const server = http.createServer(async (request, response) => {
         ok: true,
         value: {
           coworkVmPolicy: {
+            executionMode: coworkHostBashEnabled ? "container-host" : "vm",
             idleMinutes: coworkVmIdleMinutes,
             memoryGB: coworkVmMemoryGB,
             monitor: coworkVmIdleState,
@@ -1825,6 +1833,10 @@ server.listen(PORT, HOST, () => {
 });
 
 app.whenReady().then(() => {
+  if (coworkHostBashEnabled) {
+    console.warn("[cowork-wrapper] container-host Bash enabled; Cowork VM startup bypassed");
+    return;
+  }
   setTimeout(() => {
     coworkVmIdleCheck();
     setInterval(coworkVmIdleCheck, coworkVmIdlePollMs).unref();

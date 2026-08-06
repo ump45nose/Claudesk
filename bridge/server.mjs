@@ -1701,6 +1701,7 @@ async function serveOfficialAsset(response, pathname) {
   let patchedMessageActions = false;
   let patchedCodeActions = false;
   let patchedSessionMenus = false;
+  let patchedToastTimeout = false;
   if (
     gatewaySettingsEnabled
     && pathname.endsWith(".js")
@@ -1718,7 +1719,7 @@ async function serveOfficialAsset(response, pathname) {
     patchedGatewaySetup = true;
   }
   if (pathname.endsWith(".js")) {
-    const actionVersion = "20260804-2";
+    const actionVersion = "20260805-1";
     const retryGuard = 'function xF(){throw new Error("Cannot retry")}';
     const retryTarget = "onRetry:xF,changeDisplayedConversationPath:yF";
     const retryReplacement = 'onRetry:"chat"===F.sessionType?(e,t)=>"human_message_hover"===e||"assistant_message_footer"===e?zs(st.find(e=>e.uuid===t)):$s(e):xF,changeDisplayedConversationPath:yF';
@@ -1728,6 +1729,30 @@ async function serveOfficialAsset(response, pathname) {
     const messageActionsImport = 'from"./shared-10-DEXHYEQf.js"';
     const messageActionsTarget = "z=P&&!p&&m&&u&&c&&!e.sendFailed&&!D&&(w?C&&i&&!_:!!e.parent_message_uuid)";
     let source = body.toString("utf8");
+
+    const legacyToastDurationTarget = 'a=e.toast.duration??("info"===e.toast.toastType?void 0:1/0)';
+    const cdsToastDurationTarget = 'timeout:void 0!==a.duration?Number.isFinite(a.duration)?a.duration:0:"info"===a.toastType?void 0:0';
+    if (source.includes(legacyToastDurationTarget) || source.includes(cdsToastDurationTarget)) {
+      for (const [label, target] of [
+        ["legacy Toast duration", legacyToastDurationTarget],
+        ["CDS Toast duration", cdsToastDurationTarget],
+      ]) {
+        const first = source.indexOf(target);
+        if (first < 0 || source.indexOf(target, first + target.length) >= 0) {
+          throw new ApiError(
+            502,
+            `official ${label} changed; refusing an incomplete compatibility patch`,
+          );
+        }
+      }
+      source = source
+        .replace(legacyToastDurationTarget, "a=e.toast.duration??6e3")
+        .replace(
+          cdsToastDurationTarget,
+          "timeout:void 0!==a.duration?Number.isFinite(a.duration)?a.duration:0:6e3",
+        );
+      patchedToastTimeout = true;
+    }
 
     if (source.includes(editFeatureTarget)) {
       for (const [label, marker] of [
@@ -1917,12 +1942,12 @@ async function serveOfficialAsset(response, pathname) {
       patchedSessionMenus = true;
     }
 
-    if (patchedMessageActions || patchedCodeActions || patchedSessionMenus) {
+    if (patchedMessageActions || patchedCodeActions || patchedSessionMenus || patchedToastTimeout) {
       body = Buffer.from(source, "utf8");
     }
   }
   response.writeHead(200, {
-    "Cache-Control": patchedGatewaySetup || patchedMessageActions || patchedCodeActions || patchedSessionMenus
+    "Cache-Control": patchedGatewaySetup || patchedMessageActions || patchedCodeActions || patchedSessionMenus || patchedToastTimeout
       ? "no-store"
       : pathname === "/frame-shell.html"
       ? "no-store"
@@ -2026,16 +2051,16 @@ async function serveOfficialIndex(response) {
     .replace('<script type="module"', `${bootstrapInjection}<script type="module"`)
     .replace(
       /(<script type="module"[^>]*\bsrc="[^"]+\.js)(")/,
-      "$1?claudesk-session-menus=20260804-2$2",
+      "$1?claudesk-entry=20260806-1$2",
     )
     .replace("</head>", `${overrideStyles}</head>`);
   if (!html.includes("__CLAUDE_REMOTE_BOOTSTRAP__")) {
     throw new ApiError(502, "official ion-dist entry format changed; refusing an unshimmed page");
   }
-  if (!html.includes("?claudesk-session-menus=20260804-2")) {
+  if (!html.includes("?claudesk-entry=20260806-1")) {
     throw new ApiError(
       502,
-      "official ion-dist module entry changed; refusing an unpatched session menu entry",
+      "official ion-dist module entry changed; refusing an unpatched compatibility entry",
     );
   }
   const body = Buffer.from(html, "utf8");
