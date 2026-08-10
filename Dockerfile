@@ -31,6 +31,18 @@ RUN npm install --prefix /opt/asar --omit=dev @electron/asar@3.2.17 && \
     cp -a bridge-wrapper /out/injection/bridge-wrapper && \
     cp -a /opt/asar /out/asar
 
+FROM node:22-bookworm-slim AS notion-mcp-builder
+
+ARG NOTION_MCP_SERVER_VERSION=2.5.1
+
+RUN npm install \
+        --prefix /opt/notion-mcp \
+        --omit=dev \
+        --ignore-scripts \
+        --no-audit \
+        --no-fund \
+        "@notionhq/notion-mcp-server@${NOTION_MCP_SERVER_VERSION}"
+
 FROM jlesage/baseimage-gui:debian-12-v4.11.3
 
 RUN add-pkg \
@@ -71,14 +83,18 @@ COPY --from=virtiofsd-builder \
     /usr/bin/virtiofsd
 
 COPY --from=wrapper-builder /out/ /opt/claude-cowork-bridge/
+COPY --from=notion-mcp-builder /opt/notion-mcp/ /opt/notion-mcp/
 
 COPY rootfs/ /
+COPY bridge/public/fonts/AnthropicSerif-Text-Regular-CJK.otf \
+    /usr/local/share/fonts/claudesk/AnthropicSerif-Text-Regular-CJK.otf
 
 # On this NAS, root inside a container has CAP_DAC_OVERRIDE and dash's `test -x`
 # reports regular 0644 files as executable.  The upstream init script uses
 # `test -x` to distinguish literal environment files from scripts, so make that
 # decision from the actual mode bits instead.
-RUN sed -i \
+RUN fc-cache -f && \
+    sed -i \
         's/if \[ -x "${fpath}" \]; then/if stat -c "%A" "${fpath}" | grep -q "[xst]"; then/' \
         /init && \
     sed -i \

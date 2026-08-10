@@ -453,6 +453,32 @@
     return `/api/remote/files/download?path=${encodeURIComponent(String(path || ""))}${inline ? "&inline=1" : ""}`;
   }
 
+  let lastArtifactDownload = { artifactId: "", startedAt: 0 };
+
+  function downloadRemoteArtifact(artifactId) {
+    const id = String(artifactId || "");
+    const now = Date.now();
+    if (!id || (
+      lastArtifactDownload.artifactId === id
+      && now - lastArtifactDownload.startedAt < 2000
+    )) return Promise.resolve(true);
+    lastArtifactDownload = { artifactId: id, startedAt: now };
+    openBrowserUrl(
+      `/api/remote/artifacts/download?id=${encodeURIComponent(id)}`,
+      { downloadName: `${id}.html` },
+    );
+    setTimeout(() => {
+      const url = new URL(globalThis.location.href);
+      if (url.searchParams.get("coworkArtifact") !== id) return;
+      url.searchParams.delete("coworkArtifact");
+      globalThis.history.replaceState(globalThis.history.state, "", url);
+      globalThis.dispatchEvent(new PopStateEvent("popstate", {
+        state: globalThis.history.state,
+      }));
+    }, 100);
+    return Promise.resolve(true);
+  }
+
   function browserMethod(surface, method) {
     if (surface === "FileSystem") {
       if (method === "browseFiles") {
@@ -518,6 +544,15 @@
         globalThis.print();
         return true;
       };
+    }
+    if (surface === "CoworkArtifacts" && method === "showArtifact") {
+      return downloadRemoteArtifact;
+    }
+    if (
+      surface === "CoworkArtifacts"
+      && ["hideArtifact", "parkAndCaptureArtifact", "reloadArtifactView"].includes(method)
+    ) {
+      return async () => null;
     }
     if (surface === "LocalSessions") {
       if (method === "getDetectedProjects") {

@@ -1,7 +1,7 @@
 import http from "node:http";
 import { createHash, randomUUID } from "node:crypto";
 import { createReadStream } from "node:fs";
-import { mkdir, readFile, readdir, stat, writeFile } from "node:fs/promises";
+import { mkdir, readFile, readdir, realpath, stat, writeFile } from "node:fs/promises";
 import { basename, dirname, extname, normalize, resolve } from "node:path";
 import { Readable } from "node:stream";
 
@@ -17,6 +17,9 @@ const infrastructureActionsEnabled =
   process.env.CLAUDE_REMOTE_INFRASTRUCTURE_ACTIONS === "1";
 const codeActionsEnabled = process.env.CLAUDE_REMOTE_CODE_ACTIONS === "1";
 const workspaceRoot = resolve(process.env.COWORK_REMOTE_WORKSPACE_ROOT || "/workspace");
+const artifactsRoot = resolve(
+  process.env.COWORK_REMOTE_ARTIFACTS_ROOT || "/config/Claude/Artifacts",
+);
 const internalFailureExitThreshold = Number(
   process.env.COWORK_INTERNAL_FAILURE_EXIT_THRESHOLD || 3,
 );
@@ -1306,6 +1309,51 @@ async function handleApi(request, response, url) {
     return;
   }
 
+  if (request.method === "GET" && url.pathname === "/api/remote/artifacts/download") {
+    const artifactId = url.searchParams.get("id");
+    if (
+      typeof artifactId !== "string"
+      || !artifactId
+      || artifactId.length > 200
+      || /[\\/\u0000-\u001f]/.test(artifactId)
+    ) {
+      throw new ApiError(400, "artifact id is invalid");
+    }
+    const indexPath = await desktop.invoke(
+      "CoworkArtifacts",
+      "getArtifactIndexHtmlPath",
+      [artifactId],
+    );
+    if (typeof indexPath !== "string" || !indexPath) {
+      throw new ApiError(404, "artifact was not found");
+    }
+    const [canonicalRoot, canonicalIndex] = await Promise.all([
+      realpath(artifactsRoot),
+      realpath(indexPath),
+    ]);
+    if (
+      canonicalIndex !== canonicalRoot
+      && !canonicalIndex.startsWith(`${canonicalRoot}/`)
+    ) {
+      throw new ApiError(403, "artifact path is outside the artifact store");
+    }
+    const info = await stat(canonicalIndex);
+    if (!info.isFile() || extname(canonicalIndex).toLowerCase() !== ".html") {
+      throw new ApiError(404, "artifact HTML was not found");
+    }
+    const downloadName = `${artifactId}.html`;
+    response.writeHead(200, {
+      "Cache-Control": "no-store",
+      "Content-Disposition": `attachment; filename="artifact.html"; filename*=UTF-8''${encodeURIComponent(downloadName)}`,
+      "Content-Length": info.size,
+      "Content-Type": "text/html; charset=utf-8",
+      "Referrer-Policy": "no-referrer",
+      "X-Content-Type-Options": "nosniff",
+    });
+    createReadStream(canonicalIndex).pipe(response);
+    return;
+  }
+
   if (request.method === "GET" && url.pathname === "/api/remote/files/reveal") {
     await serveWorkspaceDirectory(response, url.searchParams.get("path"));
     return;
@@ -2036,7 +2084,7 @@ async function serveOfficialIndex(response) {
     '<meta name="theme-color" content="#f7f6f2">',
     `<script>globalThis.__CLAUDE_REMOTE_BOOTSTRAP__=${htmlSafeJson(config)}</script>`,
     '<script src="/remote-main-menu.js?v=20260801-4"></script>',
-    '<script src="/remote-preload.js?v=20260804-2"></script>',
+    '<script src="/remote-preload.js?v=20260808-4"></script>',
   ].join("");
   // The official entry lists its CSS after the module script. Put our narrow
   // remote overrides at the very end of <head>, otherwise the official button
