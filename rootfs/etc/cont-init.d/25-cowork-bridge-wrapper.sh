@@ -11,10 +11,22 @@ patched_mode_file="$state_dir/patched.mode"
 asar_cli=/opt/claude-cowork-bridge/asar/node_modules/@electron/asar/bin/asar.js
 injection_dir=/opt/claude-cowork-bridge/injection/bridge-wrapper
 package_patcher=/opt/claude-cowork-bridge/patch-package.mjs
+renderer_preparer=/opt/claude-cowork-bridge/prepare-renderer.mjs
 requested_mode="vm"
 [ "${CLAUDE_COWORK_HOST_BASH:-0}" != "1" ] || requested_mode="container-host"
 
 mkdir -p "$state_dir"
+installed_version="$(dpkg-query -W -f='${Version}' claude-desktop)"
+if [ "$installed_version" != "${CLAUDE_DESKTOP_VERSION:-}" ]; then
+    printf '[cowork-wrapper] installed Desktop %s does not match fixed version %s\n' \
+        "$installed_version" "${CLAUDE_DESKTOP_VERSION:-unset}" >&2
+    exit 1
+fi
+
+prepare_renderer() {
+    /usr/bin/node "$renderer_preparer"
+}
+
 active_sha="$(sha256sum "$active_asar" | awk '{ print $1 }')"
 patched_sha=""
 [ ! -f "$patched_sha_file" ] || patched_sha="$(cat "$patched_sha_file")"
@@ -34,6 +46,7 @@ fi
 
 if [ -n "$patched_sha" ] && [ "$active_sha" = "$patched_sha" ]; then
     if [ "$patched_mode" = "$requested_mode" ]; then
+        prepare_renderer
         printf '[cowork-wrapper] enabled; patched official app.asar already active (%s)\n' "$requested_mode"
         exit 0
     fi
@@ -58,4 +71,5 @@ cp -f "$active_asar" "$official_asar"
 mv -f "$patched_asar" "$active_asar"
 sha256sum "$active_asar" | awk '{ print $1 }' > "$patched_sha_file"
 printf '%s\n' "$requested_mode" > "$patched_mode_file"
+prepare_renderer
 printf '[cowork-wrapper] enabled; official app.asar patched with Cowork IPC entry (%s)\n' "$requested_mode"

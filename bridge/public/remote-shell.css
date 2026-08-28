@@ -1,6 +1,6 @@
 @font-face {
   font-family: "Anthropic Serif Text CJK";
-  src: url("/fonts/AnthropicSerif-Text-Regular-CJK.otf?v=20260803-1") format("opentype");
+  src: url("/fonts/AnthropicSerif-Text-Regular-CJK.otf?v=__CLAUDESK_RELEASE__") format("opentype");
   font-style: normal;
   font-weight: 400;
   font-display: swap;

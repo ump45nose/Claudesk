@@ -1,11 +1,12 @@
-const CACHE_NAME = "claude-official-remote-20260804-2";
+const RELEASE = "__CLAUDESK_RELEASE__";
+const CACHE_NAME = `claude-official-remote-${RELEASE}`;
 const SHELL_ASSETS = [
   "/",
-  "/remote-main-menu.css?v=20260801-2",
-  "/remote-main-menu.js?v=20260801-4",
-  "/remote-preload.js?v=20260804-2",
-  "/remote-shell.css?v=20260804-1",
-  "/manifest.webmanifest?v=20260801-1",
+  `/remote-main-menu.css?v=${RELEASE}`,
+  `/remote-main-menu.js?v=${RELEASE}`,
+  `/remote-preload.js?v=${RELEASE}`,
+  `/remote-shell.css?v=${RELEASE}`,
+  `/manifest.webmanifest?v=${RELEASE}`,
   "/desktop-icon.png",
 ];
 
@@ -48,19 +49,13 @@ self.addEventListener("fetch", (event) => {
   }
 
   const officialImmutableAsset = [
+    "/renderer/",
     "/_frame-rt/",
     "/assets/",
     "/audio/",
     "/i18n/",
     "/images/",
   ].some((prefix) => url.pathname.startsWith(prefix));
-  const compatibilityAsset = [...url.searchParams.keys()]
-    .some((key) => key.startsWith("claudesk-"))
-    || /\/assets\/v1\/shared-(?:12-kUZ_jZyi|17-YFu3JFq7)\.js$/.test(url.pathname);
-  if (compatibilityAsset) {
-    event.respondWith(fetch(request, { cache: "no-store" }));
-    return;
-  }
   event.respondWith(caches.match(request).then(async (cached) => {
     if (cached) return cached;
     const response = await fetch(request);

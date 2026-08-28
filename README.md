@@ -105,7 +105,9 @@ docker compose logs -f claude-desktop cowork-bridge
 docker compose down
 ```
 
-容器默认在启动时检查并更新官方 Claude Desktop 包（`CLAUDE_UPDATE_ON_START=1`）。如果更新源暂时不可用，启动脚本会继续使用已安装版本。
+镜像固定安装 `CLAUDE_DESKTOP_VERSION` 指定的精确版本，容器重启不会执行 APT 升级。生产机使用
+`ops/systemd/claudesk-monthly-update.timer` 在每月 1 日 04:30（Asia/Taipei）构建候选镜像；
+只有当前单版本 Renderer 补丁准备和基本冒烟通过后才切换，失败会保留或恢复上一镜像。
 
 ## 配置项
 
@@ -115,6 +117,7 @@ docker compose down
 | --- | --- | --- |
 | `COWORK_WEB_PORT` | `15821` | 宿主机公开端口，映射到 Bridge `8080` |
 | `COWORK_BRIDGE_INTERNAL_PORT` | `9222` | Desktop 内部 Cowork adapter 端口，仅 loopback |
+| `CLAUDE_DESKTOP_VERSION` | `1.28929.0` | 构建时固定安装的官方 Desktop 精确版本 |
 | `CLAUDE_GATEWAY_BASE_URL` | — | Gateway origin；通常不要附加 `/v1` |
 | `CLAUDE_GATEWAY_API_KEY` | — | Gateway 凭据，仅写入 `.env`/受管配置 |
 | `CLAUDE_GATEWAY_AUTH_SCHEME` | `bearer` | Gateway 认证方案 |
@@ -241,4 +244,3 @@ Bridge 源码在 `bridge/`，Electron 注入包装器在 `bridge-wrapper/`，启
 - [LINUX DO](https://linux.do/)：项目交流社区。
 
 Claude、Claude Desktop 及相关标识是 Anthropic 的商标。本项目仅提供互操作与自托管部署代码。
-

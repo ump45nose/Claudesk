@@ -2,7 +2,7 @@
 
 const http = require("node:http");
 const { randomBytes } = require("node:crypto");
-const { createReadStream } = require("node:fs");
+const { createReadStream, existsSync, readFileSync } = require("node:fs");
 const { createConnection } = require("node:net");
 const { mkdir, open, readFile, readdir, rename, stat, unlink, writeFile } = require("node:fs/promises");
 const { basename, dirname, extname, join, normalize, resolve } = require("node:path");
@@ -11,6 +11,16 @@ const { app, BrowserWindow, ipcMain, Menu, webContents } = require("electron");
 const HOST = "127.0.0.1";
 const PORT = Number(process.env.COWORK_BRIDGE_INTERNAL_PORT || 9222);
 const ION_ROOT = resolve("/usr/lib/claude-desktop/resources/ion-dist");
+const RENDERER_STATE_ROOT = resolve("/var/lib/claude-cowork-bridge/renderer");
+const rendererManifest = JSON.parse(
+  readFileSync(resolve(RENDERER_STATE_ROOT, "current.json"), "utf8"),
+);
+if (
+  rendererManifest.desktopVersion !== process.env.CLAUDE_DESKTOP_VERSION
+  || !/^\/renderer\/\d+\.\d+\.\d+\/\d{8}-\d+$/.test(rendererManifest.basePath)
+) {
+  throw new Error("prepared renderer manifest does not match the fixed Desktop version");
+}
 const DESKTOP_ICON = "/usr/lib/claude-desktop/resources/icon.png";
 const gatewaySettingsEnabled = process.env.CLAUDE_REMOTE_GATEWAY_SETTINGS === "1";
 const developerActionsEnabled = process.env.CLAUDE_REMOTE_DEVELOPER_ACTIONS === "1";
@@ -18,6 +28,21 @@ const infrastructureActionsEnabled =
   process.env.CLAUDE_REMOTE_INFRASTRUCTURE_ACTIONS === "1";
 const codeActionsEnabled = process.env.CLAUDE_REMOTE_CODE_ACTIONS === "1";
 const coworkHostBashEnabled = process.env.CLAUDE_COWORK_HOST_BASH === "1";
+const rendererReadyTimeoutMs = 15 * 1000;
+const rendererReadyPollMs = 250;
+
+// The official app uses app.relaunch() for login/account transitions. In the
+// container the app process is already supervised, so Electron's detached
+// replacement races the supervisor restart and leaves two Desktop instances
+// sharing one persistent profile. Let the supervisor perform the restart after
+// the official app exits instead.
+app.relaunch = () => {
+  console.info("[cowork-wrapper] delegated app relaunch to container supervisor");
+};
+
+function wait(milliseconds) {
+  return new Promise((resolveWait) => setTimeout(resolveWait, milliseconds));
+}
 
 function boundedInteger(value, fallback, minimum, maximum) {
   const parsed = Number(value);
@@ -1012,14 +1037,18 @@ function rendererCandidates() {
 
 async function evaluateInOfficialRenderer(expression) {
   let lastError = null;
-  for (const contents of rendererCandidates()) {
-    try {
-      const value = await contents.executeJavaScript(expression, true);
-      if (value !== "__COWORK_BRIDGE_NOT_AVAILABLE__") return value;
-    } catch (error) {
-      lastError = error;
+  const deadline = Date.now() + rendererReadyTimeoutMs;
+  do {
+    for (const contents of rendererCandidates()) {
+      try {
+        const value = await contents.executeJavaScript(expression, true);
+        if (value !== "__COWORK_BRIDGE_NOT_AVAILABLE__") return value;
+      } catch (error) {
+        lastError = error;
+      }
     }
-  }
+    if (Date.now() < deadline) await wait(rendererReadyPollMs);
+  } while (Date.now() < deadline);
   if (lastError) throw lastError;
   throw new Error("official Cowork renderer is not ready");
 }
@@ -1524,18 +1553,22 @@ async function ensureRelayedEventsRegistered() {
     return true;
   })()`;
   let lastError = null;
-  for (const contents of rendererCandidates()) {
-    attachRelayConsole(contents);
-    try {
-      const registered = await contents.executeJavaScript(expression, true);
-      if (registered === true) {
-        registeredRelayContentsId = contents.id;
-        return;
+  const deadline = Date.now() + rendererReadyTimeoutMs;
+  do {
+    for (const contents of rendererCandidates()) {
+      attachRelayConsole(contents);
+      try {
+        const registered = await contents.executeJavaScript(expression, true);
+        if (registered === true) {
+          registeredRelayContentsId = contents.id;
+          return;
+        }
+      } catch (error) {
+        lastError = error;
       }
-    } catch (error) {
-      lastError = error;
     }
-  }
+    if (Date.now() < deadline) await wait(rendererReadyPollMs);
+  } while (Date.now() < deadline);
   if (lastError) throw lastError;
   throw new Error("official Cowork renderer is not ready");
 }
@@ -1613,17 +1646,32 @@ async function fetchOfficialProtocol({ method, pathname, search, headers, bodyBa
 }
 
 async function serveIon(response, pathname) {
-  const requested = pathname.slice("/ion/".length) || "index.html";
+  const prepared = pathname.startsWith(`${rendererManifest.basePath}/`);
+  const requested = prepared
+    ? pathname.slice(rendererManifest.basePath.length + 1) || "index.html"
+    : pathname.slice("/ion/".length) || "index.html";
   const safePath = normalize(requested).replace(/^(\.\.(\/|\\|$))+/, "");
-  const filePath = resolve(ION_ROOT, safePath);
+  const overlayPath = resolve(
+    RENDERER_STATE_ROOT,
+    rendererManifest.desktopVersion,
+    rendererManifest.patchRelease,
+    safePath,
+  );
+  const filePath = prepared && existsSync(overlayPath)
+    ? overlayPath
+    : resolve(ION_ROOT, safePath);
   if (filePath !== ION_ROOT && !filePath.startsWith(`${ION_ROOT}/`)) {
-    throw new Error("not found");
+    if (!prepared || !filePath.startsWith(`${RENDERER_STATE_ROOT}/`)) {
+      throw new Error("not found");
+    }
   }
   const info = await stat(filePath);
   if (!info.isFile()) throw new Error("not found");
   const body = await readFile(filePath);
   response.writeHead(200, {
-    "Cache-Control": safePath === "index.html" ? "no-store" : "public, max-age=31536000, immutable",
+    "Cache-Control": safePath === "index.html" && !prepared
+      ? "no-store"
+      : "public, max-age=31536000, immutable",
     "Content-Length": body.length,
     "Content-Type": ionMimeTypes[extname(filePath).toLowerCase()] || "application/octet-stream",
     "X-Content-Type-Options": "nosniff",
@@ -1695,7 +1743,10 @@ async function generateTitle(message, model) {
 const server = http.createServer(async (request, response) => {
   try {
     const url = new URL(request.url || "/", "http://localhost");
-    if (request.method === "GET" && url.pathname.startsWith("/ion/")) {
+    if (
+      request.method === "GET"
+      && (url.pathname.startsWith("/ion/") || url.pathname.startsWith("/renderer/"))
+    ) {
       await serveIon(response, url.pathname);
       return;
     }
@@ -1708,6 +1759,8 @@ const server = http.createServer(async (request, response) => {
       sendJson(response, 200, {
         ok: true,
         coworkReady: Boolean(surfaces.LocalAgentModeSessions?.includes("getAll")),
+        rendererReady: true,
+        renderer: rendererManifest,
         surfaces,
       });
       return;
@@ -1732,6 +1785,7 @@ const server = http.createServer(async (request, response) => {
             scheduleGuardMinutes: coworkVmScheduleGuardMinutes,
           },
           platform: process.platform,
+          renderer: rendererManifest,
           version: app.getVersion(),
         },
       });
@@ -1774,7 +1828,8 @@ const server = http.createServer(async (request, response) => {
       return;
     }
     if (request.method === "POST" && url.pathname === "/invoke") {
-      // The authenticated outer bridge already validates the surface/method.
+      // The outer bridge validates the surface/method first. Keep this second
+      // independent check because direct port exposure has no app-layer auth.
       // Preserve enough room for Desktop's base64 image attachment contract.
       const body = await readJson(request, 72 * 1024 * 1024);
       const value = await invoke(

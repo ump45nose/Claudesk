@@ -1,0 +1,11 @@
+[Unit]
+Description=Run the Claudesk update transaction monthly
+
+[Timer]
+OnCalendar=*-*-01 04:30:00 Asia/Taipei
+Persistent=true
+RandomizedDelaySec=0
+Unit=claudesk-monthly-update.service
+
+[Install]
+WantedBy=timers.target

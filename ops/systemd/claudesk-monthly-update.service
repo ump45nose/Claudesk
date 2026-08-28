@@ -1,0 +1,12 @@
+[Unit]
+Description=Stage and promote a monthly Claudesk Desktop update
+After=docker.service network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=yuwk
+Group=Users
+WorkingDirectory=/vol2/1000/Docker/stacks/claude-desktop
+ExecStart=/vol2/1000/Docker/stacks/claude-desktop/scripts/monthly-update.sh
+TimeoutStartSec=45min

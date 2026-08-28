@@ -3,6 +3,8 @@ services:
     build:
       context: .
       dockerfile: Dockerfile
+      args:
+        CLAUDE_DESKTOP_VERSION: "${CLAUDE_DESKTOP_VERSION:-1.28929.0}"
     image: local/claude-desktop-nas:official-linux
     container_name: claude-desktop
     hostname: claude-desktop
@@ -31,8 +33,6 @@ services:
       CLAUDE_COWORK_VM_IDLE_MINUTES: "${CLAUDE_COWORK_VM_IDLE_MINUTES:-30}"
       CLAUDE_COWORK_VM_SCHEDULE_GUARD_MINUTES: "${CLAUDE_COWORK_VM_SCHEDULE_GUARD_MINUTES:-10}"
       CLAUDE_COWORK_HOST_BASH: "${CLAUDE_COWORK_HOST_BASH:-0}"
-      CLAUDE_UPDATE_ON_START: "${CLAUDE_UPDATE_ON_START:-1}"
-      CLAUDE_UPDATE_TIMEOUT_SECONDS: "${CLAUDE_UPDATE_TIMEOUT_SECONDS:-300}"
       COWORK_BRIDGE_ENABLED: "${COWORK_BRIDGE_ENABLED:-1}"
       COWORK_BRIDGE_INTERNAL_PORT: "${COWORK_BRIDGE_INTERNAL_PORT:-9222}"
       CLAUDE_REMOTE_GATEWAY_SETTINGS: "${CLAUDE_REMOTE_GATEWAY_SETTINGS:-0}"
@@ -71,8 +71,8 @@ services:
 
   cowork-bridge:
     build:
-      context: ./bridge
-      dockerfile: Dockerfile
+      context: .
+      dockerfile: bridge/Dockerfile
     image: local/claude-cowork-bridge:latest
     container_name: claude-cowork-bridge
     network_mode: "service:claude-desktop"
@@ -90,9 +90,11 @@ services:
       CLAUDE_REMOTE_INFRASTRUCTURE_ACTIONS: "${CLAUDE_REMOTE_INFRASTRUCTURE_ACTIONS:-0}"
       CLAUDE_REMOTE_CODE_ACTIONS: "${CLAUDE_REMOTE_CODE_ACTIONS:-0}"
       COWORK_REMOTE_WORKSPACE_ROOT: "/workspace"
+      COWORK_REMOTE_ARTIFACTS_ROOT: "/config/Claude/Artifacts"
       COWORK_INTERNAL_FAILURE_EXIT_THRESHOLD: "${COWORK_INTERNAL_FAILURE_EXIT_THRESHOLD:-3}"
       CLAUDE_INFERENCE_MODELS_JSON: "${CLAUDE_INFERENCE_MODELS_JSON:?Set CLAUDE_INFERENCE_MODELS_JSON in .env}"
     volumes:
+      - /vol2/1000/Docker/ClaudeDesktop/config:/config:ro
       - /vol2/1000/Docker/ClaudeDesktop/workspace:/workspace
     mem_limit: "${CLAUDE_COWORK_BRIDGE_MEMORY_LIMIT:-256m}"
     healthcheck:

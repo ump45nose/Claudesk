@@ -31,7 +31,21 @@ RUN npm install --prefix /opt/asar --omit=dev @electron/asar@3.2.17 && \
     cp -a bridge-wrapper /out/injection/bridge-wrapper && \
     cp -a /opt/asar /out/asar
 
+FROM node:22-bookworm-slim AS notion-mcp-builder
+
+ARG NOTION_MCP_SERVER_VERSION=2.5.1
+
+RUN npm install \
+        --prefix /opt/notion-mcp \
+        --omit=dev \
+        --ignore-scripts \
+        --no-audit \
+        --no-fund \
+        "@notionhq/notion-mcp-server@${NOTION_MCP_SERVER_VERSION}"
+
 FROM jlesage/baseimage-gui:debian-12-v4.11.3
+
+ARG CLAUDE_DESKTOP_VERSION=1.28929.0
 
 RUN add-pkg \
         ca-certificates \
@@ -56,8 +70,9 @@ RUN add-pkg \
         > /etc/apt/sources.list.d/claude-desktop.list && \
     apt-get update && \
     DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
-        claude-desktop && \
-    dpkg-query -W -f='${Version}\n' claude-desktop \
+        "claude-desktop=${CLAUDE_DESKTOP_VERSION}" && \
+    test "$(dpkg-query -W -f='${Version}' claude-desktop)" = "${CLAUDE_DESKTOP_VERSION}" && \
+    printf '%s\n' "${CLAUDE_DESKTOP_VERSION}" \
         > /opt/claude-desktop-image-version && \
     rm -rf /var/lib/apt/lists/*
 
@@ -71,14 +86,20 @@ COPY --from=virtiofsd-builder \
     /usr/bin/virtiofsd
 
 COPY --from=wrapper-builder /out/ /opt/claude-cowork-bridge/
+COPY --from=notion-mcp-builder /opt/notion-mcp/ /opt/notion-mcp/
 
 COPY rootfs/ /
+COPY config/release.json /opt/claude-cowork-bridge/release.json
+COPY bridge/public/fonts/AnthropicSerif-Text-Regular-CJK.otf \
+    /usr/local/share/fonts/claudesk/AnthropicSerif-Text-Regular-CJK.otf
 
 # On this NAS, root inside a container has CAP_DAC_OVERRIDE and dash's `test -x`
 # reports regular 0644 files as executable.  The upstream init script uses
 # `test -x` to distinguish literal environment files from scripts, so make that
 # decision from the actual mode bits instead.
-RUN sed -i \
+RUN node -e 'const fs=require("fs");const p="/opt/claude-cowork-bridge/release.json";const r=JSON.parse(fs.readFileSync(p));r.desktopVersion=process.argv[1];fs.writeFileSync(p,JSON.stringify(r,null,2)+"\n")' "${CLAUDE_DESKTOP_VERSION}" && \
+    fc-cache -f && \
+    sed -i \
         's/if \[ -x "${fpath}" \]; then/if stat -c "%A" "${fpath}" | grep -q "[xst]"; then/' \
         /init && \
     sed -i \
@@ -100,12 +121,13 @@ RUN sed -i \
         /startapp.sh \
         /opt/claude-headless/x11-run.sh \
         /etc/cont-init.d/18-headless.sh \
-        /etc/cont-init.d/20-claude-update.sh \
         /etc/cont-init.d/25-cowork-bridge-wrapper.sh \
         /etc/cont-init.d/30-claude-config.sh && \
     set-cont-env APP_NAME "Claude Desktop Official Linux" && \
     set-cont-env APP_VERSION "official-apt"
 
-ENV CLAUDE_UPDATE_ON_START=1
+ENV CLAUDE_DESKTOP_VERSION=${CLAUDE_DESKTOP_VERSION}
+
+LABEL io.claudesk.desktop-version="${CLAUDE_DESKTOP_VERSION}"
 
 EXPOSE 5800
