@@ -6,7 +6,7 @@ project_dir="$(CDPATH='' cd -- "$(dirname -- "$0")/.." && pwd)"
 cd "$project_dir"
 
 container_name="claude-desktop"
-web_port="${WEB_PORT:-15820}"
+web_port="${WEB_PORT:-15821}"
 
 docker inspect "$container_name" \
     --format 'state={{.State.Status}} health={{if .State.Health}}{{.State.Health.Status}}{{else}}none{{end}} restart_count={{.RestartCount}}'
@@ -22,4 +22,3 @@ curl -fsS --max-time 10 "http://127.0.0.1:${web_port}/" >/dev/null
 printf 'web=http://127.0.0.1:%s/ ok\n' "$web_port"
 
 "$project_dir/scripts/cowork-bridge-smoke.sh"
-

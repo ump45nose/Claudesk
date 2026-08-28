@@ -1,9 +1,11 @@
 import http from "node:http";
 import { createHash, randomUUID } from "node:crypto";
-import { createReadStream } from "node:fs";
-import { mkdir, readFile, readdir, realpath, stat, writeFile } from "node:fs/promises";
-import { basename, dirname, extname, normalize, resolve } from "node:path";
+import { readFileSync } from "node:fs";
+import { mkdir, readFile, stat, writeFile } from "node:fs/promises";
+import { dirname, extname, normalize, resolve } from "node:path";
 import { Readable } from "node:stream";
+import { createDownloadHandler } from "./downloads.mjs";
+import { createRealtimeController } from "./realtime.mjs";
 
 const host = process.env.BRIDGE_HOST || "0.0.0.0";
 const port = Number(process.env.BRIDGE_PORT || 8080);
@@ -25,6 +27,7 @@ const internalFailureExitThreshold = Number(
 );
 const publicDir = new URL("./public/", import.meta.url).pathname;
 const undefinedSentinelKey = "__claudeRemoteUndefinedV1";
+const release = JSON.parse(readFileSync(new URL("./release.json", import.meta.url), "utf8"));
 
 function encodeIpcValue(value) {
   if (value === undefined) return { [undefinedSentinelKey]: true };
@@ -674,14 +677,6 @@ class DesktopInternalClient {
 
 const desktop = new DesktopInternalClient();
 
-const realtimeClients = new Map();
-const transcriptSnapshots = new Map();
-let latestSessionsSnapshot = null;
-let latestSessionsDigest = "";
-let realtimeRevision = 0;
-let realtimePollInFlight = false;
-let desktopEventPollInFlight = false;
-
 class ApiError extends Error {
   constructor(statusCode, message) {
     super(message);
@@ -698,209 +693,13 @@ function sendJson(response, statusCode, body) {
   response.end(JSON.stringify(body));
 }
 
-function valueDigest(value) {
-  return createHash("sha256")
-    .update(JSON.stringify(value))
-    .digest("base64url")
-    .slice(0, 20);
-}
-
-function sessionSummary(session) {
-  return {
-    sessionId: session.sessionId,
-    sessionType: session.sessionType ?? null,
-    title: session.title ?? null,
-    initialMessage: session.initialMessage ?? null,
-    model: session.model ?? null,
-    isRunning: Boolean(session.isRunning),
-    isArchived: Boolean(session.isArchived),
-    createdAt: session.createdAt ?? null,
-    lastActivityAt: session.lastActivityAt ?? null,
-  };
-}
-
-function messageContentSummary(content) {
-  if (typeof content === "string") return content;
-  if (!Array.isArray(content)) return [];
-
-  return content.map((block) => {
-    if (!block || typeof block !== "object") return block;
-    if (block.type === "text") return { type: "text", text: block.text ?? "" };
-    if (block.type === "thinking") {
-      return { type: "thinking", thinking: block.thinking ?? "" };
-    }
-    if (block.type === "tool_use") {
-      return {
-        type: "tool_use",
-        id: block.id,
-        name: block.name,
-        input: block.input,
-      };
-    }
-    if (block.type === "tool_result") {
-      return {
-        type: "tool_result",
-        tool_use_id: block.tool_use_id,
-        is_error: block.is_error,
-        content: block.content,
-      };
-    }
-    if (block.type === "image") return { type: "image" };
-    return { type: block.type ?? "unknown" };
-  });
-}
-
-function sendRealtimeEvent(response, event, data) {
-  if (response.destroyed || response.writableEnded) return false;
-  try {
-    realtimeRevision += 1;
-    response.write(`id: ${realtimeRevision}\n`);
-    response.write(`event: ${event}\n`);
-    response.write(`data: ${JSON.stringify(data)}\n\n`);
-    return true;
-  } catch {
-    realtimeClients.delete(response);
-    return false;
-  }
-}
-
-function broadcastRealtimeEvent(event, data, predicate = () => true) {
-  for (const [response, subscription] of realtimeClients) {
-    if (predicate(subscription)) sendRealtimeEvent(response, event, data);
-  }
-}
-
-async function pollRealtimeState() {
-  if (!realtimeClients.size || realtimePollInFlight) return;
-  realtimePollInFlight = true;
-  try {
-    const sessions = await desktop.invoke("LocalAgentModeSessions", "getAll", []);
-    const summaries = sessions.map(sessionSummary);
-    const snapshot = {
-      chat: summaries.filter(isChatSession),
-      cowork: summaries.filter((session) => !isChatSession(session)),
-      observedAt: new Date().toISOString(),
-    };
-    const sessionsDigest = valueDigest({ chat: snapshot.chat, cowork: snapshot.cowork });
-    if (sessionsDigest !== latestSessionsDigest) {
-      latestSessionsSnapshot = snapshot;
-      latestSessionsDigest = sessionsDigest;
-      broadcastRealtimeEvent("sessions", snapshot);
-    }
-
-    const sessionsById = new Map(sessions.map((session) => [session.sessionId, session]));
-    const selectedIds = new Set(
-      [...realtimeClients.values()].map((item) => item.sessionId).filter(Boolean),
-    );
-    const now = Date.now();
-    for (const sessionId of selectedIds) {
-      const session = sessionsById.get(sessionId);
-      if (!session) continue;
-      const previous = transcriptSnapshots.get(sessionId);
-      const activityKey = `${session.lastActivityAt ?? ""}:${Boolean(session.isRunning)}`;
-      const shouldPoll = !previous
-        || session.isRunning
-        || previous.activityKey !== activityKey
-        || now - previous.polledAt >= 10000;
-      if (!shouldPoll) continue;
-
-      try {
-        const transcript = await desktop.invoke(
-          "LocalAgentModeSessions",
-          "getTranscript",
-          [sessionId],
-        );
-        const digest = valueDigest(transcript);
-        transcriptSnapshots.set(sessionId, {
-          activityKey,
-          digest,
-          isRunning: Boolean(session.isRunning),
-          polledAt: now,
-          value: transcript,
-        });
-        if (digest !== previous?.digest || activityKey !== previous?.activityKey) {
-          broadcastRealtimeEvent(
-            "transcript",
-            {
-              sessionId,
-              value: transcript,
-              isRunning: Boolean(session.isRunning),
-              observedAt: new Date().toISOString(),
-            },
-            (subscription) => subscription.sessionId === sessionId,
-          );
-        }
-      } catch (error) {
-        broadcastRealtimeEvent(
-          "sync-error",
-          { sessionId, error: error.message },
-          (subscription) => subscription.sessionId === sessionId,
-        );
-      }
-    }
-  } catch (error) {
-    broadcastRealtimeEvent("sync-error", { error: error.message });
-  } finally {
-    realtimePollInFlight = false;
-  }
-}
-
-async function pollDesktopEvents() {
-  if (!realtimeClients.size || desktopEventPollInFlight) return;
-  desktopEventPollInFlight = true;
-  try {
-    const events = await desktop.pollEvents();
-    for (const event of events) broadcastRealtimeEvent("desktop-ipc", event);
-  } catch (error) {
-    broadcastRealtimeEvent("sync-error", { error: error.message });
-  } finally {
-    desktopEventPollInFlight = false;
-  }
-}
-
-function openRealtimeStream(request, response, url) {
-  const mode = url.searchParams.get("mode") || "chat";
-  const sessionId = url.searchParams.get("sessionId") || null;
-  if (!new Set(["chat", "cowork", "code"]).has(mode)) {
-    throw new ApiError(400, "invalid realtime mode");
-  }
-  if (sessionId && (sessionId.length > 200 || !/^[A-Za-z0-9_-]+$/.test(sessionId))) {
-    throw new ApiError(400, "invalid realtime sessionId");
-  }
-
-  response.writeHead(200, {
-    "Cache-Control": "no-cache, no-store, no-transform",
-    "Connection": "keep-alive",
-    "Content-Type": "text/event-stream; charset=utf-8",
-    "X-Accel-Buffering": "no",
-    "X-Content-Type-Options": "nosniff",
-  });
-  response.write(": connected\n\n");
-  realtimeClients.set(response, { mode, sessionId });
-  sendRealtimeEvent(response, "hello", {
-    ok: true,
-    transport: "server-sent-events",
-    mode,
-    sessionId,
-  });
-  if (latestSessionsSnapshot) {
-    sendRealtimeEvent(response, "sessions", latestSessionsSnapshot);
-  }
-  const transcript = sessionId ? transcriptSnapshots.get(sessionId) : null;
-  if (transcript) {
-    sendRealtimeEvent(response, "transcript", {
-      sessionId,
-      value: transcript.value,
-      isRunning: transcript.isRunning,
-      observedAt: new Date().toISOString(),
-    });
-  }
-  void pollRealtimeState();
-
-  const close = () => realtimeClients.delete(response);
-  request.on("close", close);
-  response.on("close", close);
-}
+const realtime = createRealtimeController({ desktop, isChatSession, ApiError });
+const handleDownload = createDownloadHandler({
+  ApiError,
+  artifactsRoot,
+  mimeTypes,
+  resolveWorkspacePath,
+});
 
 async function readJson(request, maxSize = 1024 * 1024) {
   const chunks = [];
@@ -1001,44 +800,6 @@ async function receiveBrowserUpload(request) {
     ? resolve(uploadRoot, firstParts[0])
     : uploadRoot;
   return { paths: uploaded, root: commonRoot };
-}
-
-function htmlEscape(value) {
-  return String(value)
-    .replaceAll("&", "&amp;")
-    .replaceAll("<", "&lt;")
-    .replaceAll(">", "&gt;")
-    .replaceAll('"', "&quot;")
-    .replaceAll("'", "&#39;");
-}
-
-async function serveWorkspaceDirectory(response, requestedPath) {
-  const target = resolveWorkspacePath(requestedPath || workspaceRoot);
-  const info = await stat(target);
-  const directory = info.isDirectory() ? target : dirname(target);
-  const entries = (await readdir(directory, { withFileTypes: true }))
-    .sort((left, right) => Number(right.isDirectory()) - Number(left.isDirectory())
-      || left.name.localeCompare(right.name));
-  const parent = directory === workspaceRoot ? null : dirname(directory);
-  const rows = entries.map((entry) => {
-    const itemPath = resolve(directory, entry.name);
-    const href = entry.isDirectory()
-      ? `/api/remote/files/reveal?path=${encodeURIComponent(itemPath)}`
-      : `/api/remote/files/download?path=${encodeURIComponent(itemPath)}&inline=1`;
-    return `<li><a href="${href}">${entry.isDirectory() ? "📁" : "📄"} ${htmlEscape(entry.name)}</a></li>`;
-  }).join("");
-  const parentLink = parent
-    ? `<p><a href="/api/remote/files/reveal?path=${encodeURIComponent(parent)}">← Parent folder</a></p>`
-    : "";
-  const html = `<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width"><title>${htmlEscape(directory)}</title><style>body{font:15px system-ui;margin:24px;background:#f7f6f2;color:#242321}a{color:inherit;text-decoration:none}a:hover{text-decoration:underline}ul{list-style:none;padding:0}li{padding:9px 10px;border-bottom:1px solid #ddd8cf;overflow-wrap:anywhere}code{font-size:12px;color:#68645d}</style></head><body><h1>Remote workspace</h1><code>${htmlEscape(directory)}</code>${parentLink}<ul>${rows}</ul></body></html>`;
-  response.writeHead(200, {
-    "Cache-Control": "no-store",
-    "Content-Security-Policy": "default-src 'none'; style-src 'unsafe-inline'",
-    "Content-Type": "text/html; charset=utf-8",
-    "Referrer-Policy": "no-referrer",
-    "X-Content-Type-Options": "nosniff",
-  });
-  response.end(html);
 }
 
 function validateStoreRead(surface, store) {
@@ -1290,74 +1051,7 @@ async function handleApi(request, response, url) {
     sendJson(response, 200, { ok: true, value });
     return;
   }
-
-  if (request.method === "GET" && url.pathname === "/api/remote/files/download") {
-    const filePath = resolveWorkspacePath(url.searchParams.get("path"), { allowRoot: false });
-    const info = await stat(filePath);
-    if (!info.isFile()) throw new ApiError(404, "workspace file was not found");
-    const name = basename(filePath).replace(/[\r\n"]/g, "_");
-    const inline = url.searchParams.get("inline") === "1";
-    response.writeHead(200, {
-      "Cache-Control": "no-store",
-      "Content-Disposition": `${inline ? "inline" : "attachment"}; filename="${name}"; filename*=UTF-8''${encodeURIComponent(basename(filePath))}`,
-      "Content-Length": info.size,
-      "Content-Type": mimeTypes[extname(filePath).toLowerCase()] || "application/octet-stream",
-      "Referrer-Policy": "no-referrer",
-      "X-Content-Type-Options": "nosniff",
-    });
-    createReadStream(filePath).pipe(response);
-    return;
-  }
-
-  if (request.method === "GET" && url.pathname === "/api/remote/artifacts/download") {
-    const artifactId = url.searchParams.get("id");
-    if (
-      typeof artifactId !== "string"
-      || !artifactId
-      || artifactId.length > 200
-      || /[\\/\u0000-\u001f]/.test(artifactId)
-    ) {
-      throw new ApiError(400, "artifact id is invalid");
-    }
-    const indexPath = await desktop.invoke(
-      "CoworkArtifacts",
-      "getArtifactIndexHtmlPath",
-      [artifactId],
-    );
-    if (typeof indexPath !== "string" || !indexPath) {
-      throw new ApiError(404, "artifact was not found");
-    }
-    const [canonicalRoot, canonicalIndex] = await Promise.all([
-      realpath(artifactsRoot),
-      realpath(indexPath),
-    ]);
-    if (
-      canonicalIndex !== canonicalRoot
-      && !canonicalIndex.startsWith(`${canonicalRoot}/`)
-    ) {
-      throw new ApiError(403, "artifact path is outside the artifact store");
-    }
-    const info = await stat(canonicalIndex);
-    if (!info.isFile() || extname(canonicalIndex).toLowerCase() !== ".html") {
-      throw new ApiError(404, "artifact HTML was not found");
-    }
-    const downloadName = `${artifactId}.html`;
-    response.writeHead(200, {
-      "Cache-Control": "no-store",
-      "Content-Disposition": `attachment; filename="artifact.html"; filename*=UTF-8''${encodeURIComponent(downloadName)}`,
-      "Content-Length": info.size,
-      "Content-Type": "text/html; charset=utf-8",
-      "Referrer-Policy": "no-referrer",
-      "X-Content-Type-Options": "nosniff",
-    });
-    createReadStream(canonicalIndex).pipe(response);
-    return;
-  }
-
-  if (request.method === "GET" && url.pathname === "/api/remote/files/reveal") {
-    await serveWorkspaceDirectory(response, url.searchParams.get("path"));
-    return;
-  }
+  if (await handleDownload(request, response, url)) return;
 
   if (request.method === "POST" && url.pathname === "/api/remote/ipc") {
     // Official Desktop carries image attachments as base64 in send/start IPC.
@@ -1536,13 +1230,16 @@ async function handleApi(request, response, url) {
   }
 
   if (request.method === "GET" && url.pathname === "/api/events") {
-    openRealtimeStream(request, response, url);
+    realtime.open(request, response, url);
     return;
   }
 
   if (request.method === "GET" && url.pathname === "/api/health") {
     try {
-      const surfaces = await desktop.inspect();
+      const [surfaces, desktopRuntime] = await Promise.all([
+        desktop.inspect(),
+        desktop.runtime(),
+      ]);
       const runtimeControlReady = Boolean(
         surfaces?.ClaudeVM?.includes("isHostLoopModeEnabled")
         && surfaces?.ClaudeVM?.includes("getDownloadStatus")
@@ -1551,6 +1248,8 @@ async function handleApi(request, response, url) {
       );
       sendJson(response, 200, {
         ok: true,
+        release,
+        renderer: desktopRuntime.renderer,
         transport: "official-renderer-ipc",
         runtimeControlReady,
         coworkReady: Boolean(
@@ -1618,11 +1317,18 @@ async function handleApi(request, response, url) {
     const body = await readJson(request);
     const message = requireNonEmptyString(body.message, "message");
     const model = requireConfiguredModel(body.model);
-    const title = requireNonEmptyString(
-      await desktop.generateTitle(message, model),
-      "generated title",
-      200,
-    );
+    let title;
+    try {
+      title = requireNonEmptyString(
+        await desktop.generateTitle(message, model),
+        "generated title",
+        200,
+      );
+    } catch {
+      // A title is presentation metadata. Do not prevent a short new session
+      // from starting when the optional title-generation request is unavailable.
+      title = message.replace(/\s+/g, " ").slice(0, 200);
+    }
     const sessionId = `local_${randomUUID()}`;
     const messageUuid = randomUUID();
     const value = await desktop.invoke("LocalAgentModeSessions", "start", [{
@@ -1725,7 +1431,15 @@ async function serveStatic(response, pathname) {
   }
   const info = await stat(filePath);
   if (!info.isFile()) throw new Error("not found");
-  const body = await readFile(filePath);
+  let body = await readFile(filePath);
+  if ([".css", ".html", ".js"].includes(extname(filePath))) {
+    const source = body.toString("utf8");
+    const marker = "__CLAUDESK_RELEASE__";
+    if (pathname === "/service-worker.js" && !source.includes(marker)) {
+      throw new ApiError(500, "service worker release marker is missing");
+    }
+    body = Buffer.from(source.replaceAll(marker, release.patchRelease), "utf8");
+  }
   const fileExtension = extname(filePath);
   response.writeHead(200, {
     "Cache-Control": fileExtension === ".otf"
@@ -1739,265 +1453,12 @@ async function serveStatic(response, pathname) {
   response.end(body);
 }
 
-async function serveOfficialAsset(response, pathname) {
-  const upstream = await desktop.fetchRaw(
-    pathname === "/desktop-icon.png" ? pathname : `/ion${pathname}`,
-  );
-  if (!upstream.ok) throw new ApiError(upstream.status, "official ion-dist asset not found");
-  let body = Buffer.from(await upstream.arrayBuffer());
-  let patchedGatewaySetup = false;
-  let patchedMessageActions = false;
-  let patchedCodeActions = false;
-  let patchedSessionMenus = false;
-  let patchedToastTimeout = false;
-  if (
-    gatewaySettingsEnabled
-    && pathname.endsWith(".js")
-    && body.includes(Buffer.from("Configure third-party inference"))
-  ) {
-    const source = body.toString("utf8");
-    const guard = '"app:"===window.location.protocol';
-    if (!source.includes(guard)) {
-      throw new ApiError(502, "official Gateway setup guard changed; refusing an unsafe patch");
-    }
-    body = Buffer.from(source.replace(
-      guard,
-      '("app:"===window.location.protocol||globalThis.__CLAUDE_REMOTE_BOOTSTRAP__?.gatewaySettingsEnabled===true)',
-    ), "utf8");
-    patchedGatewaySetup = true;
-  }
-  if (pathname.endsWith(".js")) {
-    const actionVersion = "20260805-1";
-    const retryGuard = 'function xF(){throw new Error("Cannot retry")}';
-    const retryTarget = "onRetry:xF,changeDisplayedConversationPath:yF";
-    const retryReplacement = 'onRetry:"chat"===F.sessionType?(e,t)=>"human_message_hover"===e||"assistant_message_footer"===e?zs(st.find(e=>e.uuid===t)):$s(e):xF,changeDisplayedConversationPath:yF';
-    const editFeatureTarget = 'Ee=Mt("cowork_edit_message_button")';
-    const rewindCapabilityTarget = "Ke=de?Re&&void 0!==J:!!Fs?.rewind";
-    const showEditTarget = "Je=Ee&&!de&&!Ye";
-    const messageActionsImport = 'from"./shared-10-DEXHYEQf.js"';
-    const messageActionsTarget = "z=P&&!p&&m&&u&&c&&!e.sendFailed&&!D&&(w?C&&i&&!_:!!e.parent_message_uuid)";
-    let source = body.toString("utf8");
-
-    const legacyToastDurationTarget = 'a=e.toast.duration??("info"===e.toast.toastType?void 0:1/0)';
-    const cdsToastDurationTarget = 'timeout:void 0!==a.duration?Number.isFinite(a.duration)?a.duration:0:"info"===a.toastType?void 0:0';
-    if (source.includes(legacyToastDurationTarget) || source.includes(cdsToastDurationTarget)) {
-      for (const [label, target] of [
-        ["legacy Toast duration", legacyToastDurationTarget],
-        ["CDS Toast duration", cdsToastDurationTarget],
-      ]) {
-        const first = source.indexOf(target);
-        if (first < 0 || source.indexOf(target, first + target.length) >= 0) {
-          throw new ApiError(
-            502,
-            `official ${label} changed; refusing an incomplete compatibility patch`,
-          );
-        }
-      }
-      source = source
-        .replace(legacyToastDurationTarget, "a=e.toast.duration??6e3")
-        .replace(
-          cdsToastDurationTarget,
-          "timeout:void 0!==a.duration?Number.isFinite(a.duration)?a.duration:0:6e3",
-        );
-      patchedToastTimeout = true;
-    }
-
-    if (source.includes(editFeatureTarget)) {
-      for (const [label, marker] of [
-        ["retry guard", retryGuard],
-        ["retry callback", retryTarget],
-        ["edit feature gate", editFeatureTarget],
-        ["rewind capability", rewindCapabilityTarget],
-        ["edit affordance gate", showEditTarget],
-        ["message actions import", messageActionsImport],
-      ]) {
-        const first = source.indexOf(marker);
-        if (first < 0 || source.indexOf(marker, first + marker.length) >= 0) {
-          throw new ApiError(
-            502,
-            `official Cowork ${label} changed; refusing an incomplete compatibility patch`,
-          );
-        }
-      }
-      source = source
-        .replace(retryTarget, retryReplacement)
-        .replace(editFeatureTarget, "Ee=true")
-        .replace(rewindCapabilityTarget, "Ke=Ee||(de?Re&&void 0!==J:!!Fs?.rewind)")
-        .replace(showEditTarget, "Je=Ee&&!Ye")
-        .replace(
-          messageActionsImport,
-          `from"./shared-10-DEXHYEQf.js?claudesk-edit-actions=${actionVersion}"`,
-        );
-      patchedMessageActions = true;
-    } else if (source.includes(messageActionsTarget)) {
-      const first = source.indexOf(messageActionsTarget);
-      if (source.indexOf(messageActionsTarget, first + messageActionsTarget.length) >= 0) {
-        throw new ApiError(
-          502,
-          "official sent-message edit condition changed; refusing an ambiguous compatibility patch",
-        );
-      }
-      source = source.replace(
-        messageActionsTarget,
-        "z=P&&!p&&m&&u&&c&&!e.sendFailed&&!D&&(w?(!C||i)&&!_:!!e.parent_message_uuid)",
-      );
-      patchedMessageActions = true;
-    }
-
-    const codeRouteTarget = 'import("./cd377abb5-CvQ3GXS3.js")';
-    const codeSessionImport = 'from"./c5610fbe3-Bao3nWiP.js"';
-    const codeSharedImport = 'from"./c360a9e1c-DrYIyI47.js"';
-    const codeEditTarget = 'icon:"ArrowUndoUp",disabled:void 0!==s,"aria-label":n.formatMessage({defaultMessage:"Rewind to here",id:"jlXY1qCwxf"})';
-
-    if (source.includes(codeRouteTarget)) {
-      const first = source.indexOf(codeRouteTarget);
-      if (source.indexOf(codeRouteTarget, first + codeRouteTarget.length) >= 0) {
-        throw new ApiError(
-          502,
-          "official Code route import changed; refusing an ambiguous compatibility patch",
-        );
-      }
-      source = source.replace(
-        codeRouteTarget,
-        `import("./cd377abb5-CvQ3GXS3.js?claudesk-code-actions=${actionVersion}")`,
-      );
-      patchedCodeActions = true;
-    }
-
-    if (source.includes(codeSessionImport)) {
-      const first = source.indexOf(codeSessionImport);
-      if (source.indexOf(codeSessionImport, first + codeSessionImport.length) >= 0) {
-        throw new ApiError(
-          502,
-          "official Code session import changed; refusing an ambiguous compatibility patch",
-        );
-      }
-      source = source.replace(
-        codeSessionImport,
-        `from"./c5610fbe3-Bao3nWiP.js?claudesk-code-actions=${actionVersion}"`,
-      );
-      if (source.includes(codeSharedImport)) {
-        const sharedFirst = source.indexOf(codeSharedImport);
-        if (source.indexOf(codeSharedImport, sharedFirst + codeSharedImport.length) >= 0) {
-          throw new ApiError(
-            502,
-            "official Code shared import changed; refusing an ambiguous compatibility patch",
-          );
-        }
-        source = source.replace(
-          codeSharedImport,
-          `from"./c360a9e1c-DrYIyI47.js?claudesk-code-actions=${actionVersion}"`,
-        );
-      }
-      patchedCodeActions = true;
-    } else if (source.includes(codeSharedImport) && source.includes("rewindV2")) {
-      const first = source.indexOf(codeSharedImport);
-      if (source.indexOf(codeSharedImport, first + codeSharedImport.length) >= 0) {
-        throw new ApiError(
-          502,
-          "official Code rewind shared import changed; refusing an ambiguous compatibility patch",
-        );
-      }
-      source = source.replace(
-        codeSharedImport,
-        `from"./c360a9e1c-DrYIyI47.js?claudesk-code-actions=${actionVersion}"`,
-      );
-      patchedCodeActions = true;
-    }
-
-    if (source.includes(codeEditTarget)) {
-      const first = source.indexOf(codeEditTarget);
-      if (source.indexOf(codeEditTarget, first + codeEditTarget.length) >= 0) {
-        throw new ApiError(
-          502,
-          "official Code rewind button changed; refusing an ambiguous compatibility patch",
-        );
-      }
-      source = source.replace(
-        codeEditTarget,
-        'icon:"Edit","data-testid":"code-action-bar-edit",disabled:void 0!==s,"aria-label":n.formatMessage({defaultMessage:"Edit",id:"wEQDC6Wv3/"})',
-      );
-      patchedCodeActions = true;
-    }
-
-    const sessionMenuVersion = "20260804-2";
-    const sessionMenuImport = 'from"./shared-12-kUZ_jZyi.js"';
-    const sessionSidebarImport = 'from"./shared-17-YFu3JFq7.js"';
-    const chatArchiveTarget = "onArchive:E||T?void 0:N";
-    const deleteCapabilityTarget = "O=m&&l?async()=>";
-    const projectCapabilityTarget = "B=Boolean(!f&&m&&(A?F?q||P&&z:P||q:P&&(!F||z)))";
-    if (source.includes(sessionSidebarImport) && source.includes(sessionMenuImport)) {
-      for (const [label, marker] of [
-        ["sidebar import", sessionSidebarImport],
-        ["menu import", sessionMenuImport],
-      ]) {
-        const first = source.indexOf(marker);
-        if (source.indexOf(marker, first + marker.length) >= 0) {
-          throw new ApiError(
-            502,
-            `official session ${label} changed; refusing an ambiguous compatibility patch`,
-          );
-        }
-      }
-      source = source
-        .replace(
-          sessionSidebarImport,
-          `from"./shared-17-YFu3JFq7.js?claudesk-session-menus=${sessionMenuVersion}"`,
-        )
-        .replace(
-          sessionMenuImport,
-          `from"./shared-12-kUZ_jZyi.js?claudesk-session-menus=${sessionMenuVersion}"`,
-        );
-      patchedSessionMenus = true;
-    }
-
-    if (source.includes(chatArchiveTarget) || source.includes(deleteCapabilityTarget)) {
-      for (const [label, marker] of [
-        ["Chat archive gate", chatArchiveTarget],
-        ["delete capability gate", deleteCapabilityTarget],
-        ["menu import", sessionMenuImport],
-      ]) {
-        const first = source.indexOf(marker);
-        if (first < 0 || source.indexOf(marker, first + marker.length) >= 0) {
-          throw new ApiError(
-            502,
-            `official session ${label} changed; refusing an incomplete compatibility patch`,
-          );
-        }
-      }
-      source = source
-        .replace(chatArchiveTarget, "onArchive:T?void 0:N")
-        .replace(deleteCapabilityTarget, "O=m?async()=>")
-        .replace(
-          sessionMenuImport,
-          `from"./shared-12-kUZ_jZyi.js?claudesk-session-menus=${sessionMenuVersion}"`,
-        );
-      patchedSessionMenus = true;
-    }
-
-    if (source.includes(projectCapabilityTarget)) {
-      const first = source.indexOf(projectCapabilityTarget);
-      if (source.indexOf(projectCapabilityTarget, first + projectCapabilityTarget.length) >= 0) {
-        throw new ApiError(
-          502,
-          "official Cowork project capability gate changed; refusing an ambiguous compatibility patch",
-        );
-      }
-      source = source.replace(
-        projectCapabilityTarget,
-        "B=Boolean(!f&&m&&(!F||(A?F?q||P&&z:P||q:P&&(!F||z))))",
-      );
-      patchedSessionMenus = true;
-    }
-
-    if (patchedMessageActions || patchedCodeActions || patchedSessionMenus || patchedToastTimeout) {
-      body = Buffer.from(source, "utf8");
-    }
-  }
+async function servePreparedRendererAsset(response, pathname) {
+  const upstream = await desktop.fetchRaw(pathname);
+  if (!upstream.ok) throw new ApiError(upstream.status, "prepared renderer asset not found");
+  const body = Buffer.from(await upstream.arrayBuffer());
   response.writeHead(200, {
-    "Cache-Control": patchedGatewaySetup || patchedMessageActions || patchedCodeActions || patchedSessionMenus || patchedToastTimeout
-      ? "no-store"
-      : pathname === "/frame-shell.html"
+    "Cache-Control": pathname.endsWith("/index.html")
       ? "no-store"
       : "public, max-age=31536000, immutable",
     "Content-Length": body.length,
@@ -2048,13 +1509,23 @@ function htmlSafeJson(value) {
 }
 
 async function serveOfficialIndex(response) {
-  const upstream = await desktop.fetchRaw("/ion/index.html");
+  const desktopRuntime = await desktop.runtime();
+  const rendererBase = desktopRuntime?.renderer?.basePath;
+  if (
+    desktopRuntime?.renderer?.desktopVersion !== release.desktopVersion
+    || desktopRuntime?.renderer?.patchRelease !== release.patchRelease
+    || typeof rendererBase !== "string"
+  ) {
+    throw new ApiError(503, "prepared renderer does not match the active Claudesk release");
+  }
+  const upstream = await desktop.fetchRaw(`${rendererBase}/index.html`);
   if (!upstream.ok) throw new ApiError(502, "official ion-dist entry is unavailable");
   const config = {
     configuredModels,
     chatSessionIds: await initialChatSessionIds(),
     desktopBootFeatures: await desktop.bootFeatures(),
-    desktopRuntime: await desktop.runtime(),
+    desktopRuntime,
+    release,
     codeActionsEnabled,
     developerActionsEnabled,
     gatewaySettingsEnabled,
@@ -2079,36 +1550,36 @@ async function serveOfficialIndex(response) {
     transport: "official-ion-dist-remote-ipc",
   };
   const bootstrapInjection = [
-    '<link rel="manifest" href="/manifest.webmanifest?v=20260802-2">',
-    '<link rel="preload" href="/fonts/AnthropicSerif-Text-Regular-CJK.otf?v=20260803-1" as="font" type="font/otf" crossorigin>',
+    `<link rel="manifest" href="/manifest.webmanifest?v=${release.patchRelease}">`,
+    `<link rel="preload" href="/fonts/AnthropicSerif-Text-Regular-CJK.otf?v=${release.patchRelease}" as="font" type="font/otf" crossorigin>`,
     '<meta name="theme-color" content="#f7f6f2">',
     `<script>globalThis.__CLAUDE_REMOTE_BOOTSTRAP__=${htmlSafeJson(config)}</script>`,
-    '<script src="/remote-main-menu.js?v=20260801-4"></script>',
-    '<script src="/remote-preload.js?v=20260808-4"></script>',
+    `<script src="/remote-main-menu.js?v=${release.patchRelease}"></script>`,
+    `<script src="/remote-preload.js?v=${release.patchRelease}"></script>`,
   ].join("");
   // The official entry lists its CSS after the module script. Put our narrow
   // remote overrides at the very end of <head>, otherwise the official button
   // sizing rules win in the mobile composer.
   const overrideStyles = [
-    '<link rel="stylesheet" href="/remote-shell.css?v=20260804-1">',
-    '<link rel="stylesheet" href="/remote-main-menu.css?v=20260801-2">',
+    `<link rel="stylesheet" href="/remote-shell.css?v=${release.patchRelease}">`,
+    `<link rel="stylesheet" href="/remote-main-menu.css?v=${release.patchRelease}">`,
   ].join("");
   let html = await upstream.text();
   html = html
     .replace('<link rel="manifest" href="/manifest.json">', "")
     .replace('<script type="module"', `${bootstrapInjection}<script type="module"`)
     .replace(
-      /(<script type="module"[^>]*\bsrc="[^"]+\.js)(")/,
-      "$1?claudesk-entry=20260806-1$2",
+      /\b(href|src)="\/(assets|images|audio|i18n|_frame-rt)\//g,
+      `$1="${rendererBase}/$2/`,
     )
     .replace("</head>", `${overrideStyles}</head>`);
   if (!html.includes("__CLAUDE_REMOTE_BOOTSTRAP__")) {
     throw new ApiError(502, "official ion-dist entry format changed; refusing an unshimmed page");
   }
-  if (!html.includes("?claudesk-entry=20260806-1")) {
+  if (!html.includes(`${rendererBase}/assets/`)) {
     throw new ApiError(
       502,
-      "official ion-dist module entry changed; refusing an unpatched compatibility entry",
+      "official ion-dist entry changed; refusing a mixed renderer module graph",
     );
   }
   const body = Buffer.from(html, "utf8");
@@ -2146,11 +1617,24 @@ const server = http.createServer(async (request, response) => {
       await serveStatic(response, "/manifest.webmanifest");
     } else if (localStaticFiles.has(url.pathname)) {
       await serveStatic(response, url.pathname);
+    } else if (url.pathname.startsWith("/renderer/")) {
+      await servePreparedRendererAsset(response, url.pathname);
     } else if (
       officialAssetFiles.has(url.pathname)
       || officialAssetPrefixes.some((prefix) => url.pathname.startsWith(prefix))
     ) {
-      await serveOfficialAsset(response, url.pathname);
+      const upstream = await desktop.fetchRaw(
+        url.pathname === "/desktop-icon.png" ? url.pathname : `/ion${url.pathname}`,
+      );
+      if (!upstream.ok) throw new ApiError(upstream.status, "official ion-dist asset not found");
+      const body = Buffer.from(await upstream.arrayBuffer());
+      response.writeHead(200, {
+        "Cache-Control": "public, max-age=31536000, immutable",
+        "Content-Length": body.length,
+        "Content-Type": upstream.headers.get("content-type") || "application/octet-stream",
+        "X-Content-Type-Options": "nosniff",
+      });
+      response.end(body);
     } else {
       await serveOfficialIndex(response);
     }
@@ -2164,16 +1648,11 @@ server.listen(port, host, () => {
   console.log(`[cowork-bridge] listening on ${host}:${port}; internal=${coworkInternalUrl}`);
 });
 
-const realtimePoller = setInterval(() => void pollRealtimeState(), 1000);
+const realtimePoller = setInterval(() => void realtime.pollState(), 1000);
 realtimePoller.unref();
-const desktopEventPoller = setInterval(() => void pollDesktopEvents(), 500);
+const desktopEventPoller = setInterval(() => void realtime.pollDesktopEvents(), 500);
 desktopEventPoller.unref();
-const realtimeHeartbeat = setInterval(() => {
-  for (const response of realtimeClients.keys()) {
-    if (response.destroyed || response.writableEnded) realtimeClients.delete(response);
-    else response.write(`: heartbeat ${Date.now()}\n\n`);
-  }
-}, 15000);
+const realtimeHeartbeat = setInterval(() => realtime.heartbeat(), 15000);
 realtimeHeartbeat.unref();
 
 // `network_mode: service:claude-desktop` pins this container to the Desktop
@@ -2190,6 +1669,20 @@ const internalTransportMonitor = setInterval(async () => {
     });
     consecutiveInternalTransportFailures = 0;
   } catch (error) {
+    if (
+      error?.name === "TimeoutError"
+      || error?.name === "AbortError"
+      || /aborted due to timeout/i.test(String(error?.message || ""))
+    ) {
+      // A responsive namespace can still have a temporarily busy Desktop
+      // renderer. Restarting the bridge on request timeout tears down every
+      // browser SSE subscription and turns a transient stall into a visible
+      // realtime outage. Only transport failures such as ECONNREFUSED count
+      // toward namespace reattachment.
+      consecutiveInternalTransportFailures = 0;
+      console.warn(`[cowork-bridge] internal health check timed out; keeping realtime clients connected: ${error.message}`);
+      return;
+    }
     consecutiveInternalTransportFailures += 1;
     console.error(
       `[cowork-bridge] internal transport unavailable (${consecutiveInternalTransportFailures}/${internalFailureExitThreshold}): ${error.message}`,

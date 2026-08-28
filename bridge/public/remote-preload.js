@@ -59,6 +59,8 @@
   }
 
   const config = globalThis.__CLAUDE_REMOTE_BOOTSTRAP__;
+  if (!config || config.transport !== "official-ion-dist-remote-ipc") return;
+
   const mobileClient = /Android|iPhone|iPad|iPod|Mobile/i.test(navigator.userAgent)
     || globalThis.navigator.userAgentData?.mobile === true
     || (
@@ -67,7 +69,6 @@
     );
   if (mobileClient) document.documentElement.classList.add("claude-remote-mobile");
   if (config.codeActionsEnabled) document.documentElement.classList.add("claude-remote-code-enabled");
-  if (!config || config.transport !== "official-ion-dist-remote-ipc") return;
 
   // Claude Code persists its new-session target independently from the
   // Desktop IPC stores. A fresh browser otherwise starts with no folder and
@@ -182,6 +183,9 @@
   const storeState = new Map(Object.entries(config.initialStores || {}));
   let events = null;
   let eventStreamKey = "";
+  let eventStreamGeneration = 0;
+  let eventReconnectTimer = null;
+  let eventReconnectDelayMs = 1000;
   const undefinedSentinelKey = "__claudeRemoteUndefinedV1";
 
   function encodeIpcValue(value) {
@@ -519,7 +523,7 @@
       }
       if (method === "showInFolder") {
         return async (path) => {
-          openBrowserUrl(`/api/remote/files/reveal?path=${encodeURIComponent(String(path || "/workspace"))}`);
+          openBrowserUrl(workspaceFileUrl(path, false));
           return true;
         };
       }
@@ -527,10 +531,7 @@
     if (surface === "CoworkUserFiles") {
       if (method === "pickTarget") return async () => "/workspace";
       if (method === "reveal") {
-        return async () => {
-          openBrowserUrl("/api/remote/files/reveal?path=%2Fworkspace");
-          return true;
-        };
+        return async () => false;
       }
     }
     if (surface === "CoworkSpaces" && method === "openFile") {
@@ -711,17 +712,49 @@
     return { key: params.toString(), url: `/api/events?${params.toString()}` };
   }
 
-  function connectEvents() {
+  function clearEventReconnect() {
+    if (eventReconnectTimer !== null) clearTimeout(eventReconnectTimer);
+    eventReconnectTimer = null;
+  }
+
+  function scheduleEventReconnect(generation) {
+    if (generation !== eventStreamGeneration || eventReconnectTimer !== null) return;
+    const delay = eventReconnectDelayMs;
+    eventReconnectDelayMs = Math.min(Math.round(eventReconnectDelayMs * 1.7), 10000);
+    eventReconnectTimer = setTimeout(() => {
+      eventReconnectTimer = null;
+      if (generation === eventStreamGeneration) connectEvents(true);
+    }, delay);
+  }
+
+  function connectEvents(force = false) {
     if (!("EventSource" in globalThis)) return;
     const descriptor = eventStreamDescriptor();
     if (
-      events
+      !force
+      && events
       && eventStreamKey === descriptor.key
       && events.readyState !== EventSource.CLOSED
     ) return;
+    clearEventReconnect();
+    eventStreamGeneration += 1;
+    const generation = eventStreamGeneration;
     if (events) events.close();
     eventStreamKey = descriptor.key;
     events = new EventSource(descriptor.url);
+    const stream = events;
+    stream.addEventListener("open", () => {
+      if (events !== stream || generation !== eventStreamGeneration) return;
+      eventReconnectDelayMs = 1000;
+    });
+    stream.addEventListener("error", () => {
+      if (
+        events !== stream
+        || generation !== eventStreamGeneration
+        || stream.readyState !== EventSource.CLOSED
+      ) return;
+      scheduleEventReconnect(generation);
+    });
     events.addEventListener("desktop-ipc", (event) => {
       try {
         const payload = JSON.parse(event.data);
@@ -771,7 +804,6 @@
   globalThis.addEventListener("popstate", connectEvents);
   globalThis.addEventListener("hashchange", connectEvents);
   connectEvents();
-  setInterval(connectEvents, 1000);
   setInterval(() => {
     for (const key of storeCallbacks.keys()) {
       const separator = key.indexOf(".");
@@ -781,8 +813,10 @@
     }
   }, 5000);
   document.addEventListener("visibilitychange", () => {
-    if (!document.hidden) connectEvents();
+    if (!document.hidden) connectEvents(true);
   });
+  globalThis.addEventListener("pageshow", () => connectEvents(true));
+  globalThis.addEventListener("online", () => connectEvents(true));
 
   if ("serviceWorker" in navigator) {
     addEventListener("load", () => {
@@ -793,7 +827,7 @@
         location.reload();
       });
       navigator.serviceWorker.register(
-        "/service-worker.js?v=20260804-2",
+        `/service-worker.js?v=${encodeURIComponent(config.release.patchRelease)}`,
         { updateViaCache: "none" },
       ).then((registration) => registration.update()).catch(() => {});
     });

@@ -42,7 +42,6 @@ if docker compose version >/dev/null 2>&1; then
         validation_env_created=1
     fi
 
-    CLAUDE_ENV_FILE=.env.example \
     CLAUDE_GATEWAY_BASE_URL=https://gateway.example.invalid \
     CLAUDE_GATEWAY_API_KEY=validation-placeholder \
     CLAUDE_INFERENCE_MODELS_JSON='["claude-validation-model"]' \
@@ -56,4 +55,3 @@ else
 fi
 
 printf '%s\n' 'validate: all available checks passed'
-

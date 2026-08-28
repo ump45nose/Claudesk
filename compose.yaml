@@ -3,6 +3,8 @@ services:
     build:
       context: .
       dockerfile: Dockerfile
+      args:
+        CLAUDE_DESKTOP_VERSION: "${CLAUDE_DESKTOP_VERSION:-1.28929.0}"
     image: local/claude-desktop-nas:official-linux
     container_name: claude-desktop
     hostname: claude-desktop
@@ -31,8 +33,6 @@ services:
       CLAUDE_COWORK_VM_IDLE_MINUTES: "${CLAUDE_COWORK_VM_IDLE_MINUTES:-30}"
       CLAUDE_COWORK_VM_SCHEDULE_GUARD_MINUTES: "${CLAUDE_COWORK_VM_SCHEDULE_GUARD_MINUTES:-10}"
       CLAUDE_COWORK_HOST_BASH: "${CLAUDE_COWORK_HOST_BASH:-0}"
-      CLAUDE_UPDATE_ON_START: "${CLAUDE_UPDATE_ON_START:-1}"
-      CLAUDE_UPDATE_TIMEOUT_SECONDS: "${CLAUDE_UPDATE_TIMEOUT_SECONDS:-300}"
       COWORK_BRIDGE_ENABLED: "${COWORK_BRIDGE_ENABLED:-1}"
       COWORK_BRIDGE_INTERNAL_PORT: "${COWORK_BRIDGE_INTERNAL_PORT:-9222}"
       CLAUDE_REMOTE_GATEWAY_SETTINGS: "${CLAUDE_REMOTE_GATEWAY_SETTINGS:-0}"
@@ -71,8 +71,8 @@ services:
 
   cowork-bridge:
     build:
-      context: ./bridge
-      dockerfile: Dockerfile
+      context: .
+      dockerfile: bridge/Dockerfile
     image: local/claude-cowork-bridge:latest
     container_name: claude-cowork-bridge
     network_mode: "service:claude-desktop"
