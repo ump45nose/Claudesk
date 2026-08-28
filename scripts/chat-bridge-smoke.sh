@@ -72,6 +72,8 @@ curl -fsS "$base_url/remote-preload.js?v=$release" > "$tmp_dir/remote-preload.js
 curl -fsS "$base_url/service-worker.js?v=$release" > "$tmp_dir/service-worker.js"
 node --check "$tmp_dir/remote-preload.js"
 grep -F "const RELEASE = \"$release\"" "$tmp_dir/service-worker.js" >/dev/null
+# The Service Worker template expression is intentionally matched literally.
+# shellcheck disable=SC2016
 grep -F 'const CACHE_NAME = `claude-official-remote-${RELEASE}`' \
   "$tmp_dir/service-worker.js" >/dev/null
 grep -F 'eventStreamGeneration' "$tmp_dir/remote-preload.js" >/dev/null
