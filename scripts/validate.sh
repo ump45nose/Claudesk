@@ -11,6 +11,9 @@ find bridge bridge-wrapper rootfs/opt \
 
 find rootfs scripts -type f -name '*.sh' -exec sh -n {} \;
 
+node scripts/security-smoke.mjs
+node scripts/bridge-parity-smoke.mjs
+
 jq -e . \
     bridge/public/manifest.webmanifest \
     bridge-wrapper/package.json \

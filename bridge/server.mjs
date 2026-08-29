@@ -12,7 +12,6 @@ const port = Number(process.env.BRIDGE_PORT || 8080);
 const coworkInternalUrl = (
   process.env.COWORK_INTERNAL_URL || "http://127.0.0.1:9222"
 ).replace(/\/$/, "");
-const allowDestructive = process.env.COWORK_BRIDGE_ALLOW_DESTRUCTIVE === "1";
 const gatewaySettingsEnabled = process.env.CLAUDE_REMOTE_GATEWAY_SETTINGS === "1";
 const developerActionsEnabled = process.env.CLAUDE_REMOTE_DEVELOPER_ACTIONS === "1";
 const infrastructureActionsEnabled =
@@ -512,33 +511,6 @@ const officialAssetFiles = new Set([
 
 const allowedSurfaces = new Set(allowedMethods.keys());
 
-const destructiveMethods = new Set([
-  "abandonBridgeEnvironment",
-  "clearRemoteSessionFolderGrants",
-  "delete",
-  "deleteAccountMemory",
-  "deleteArtifact",
-  "deleteBridgeAgentMemory",
-  "deleteBridgeSession",
-  "deleteSpace",
-  "removeApprovedPermission",
-  "resetBridge",
-  "resetBridgeSession",
-  "resetMemories",
-]);
-
-const infrastructureDestructiveMethods = new Set([
-  "CoworkArtifacts.deleteArtifact",
-  "CoworkMemory.deleteAccountMemory",
-  "CoworkSpaces.deleteSpace",
-]);
-const codeDestructiveMethods = new Set([
-  "LocalSessions.delete",
-]);
-const confirmedSessionDestructiveMethods = new Set([
-  "LocalAgentModeSessions.delete",
-]);
-
 const mimeTypes = {
   ".css": "text/css; charset=utf-8",
   ".html": "text/html; charset=utf-8",
@@ -693,12 +665,53 @@ function sendJson(response, statusCode, body) {
   response.end(JSON.stringify(body));
 }
 
+function sendDesktopReconnectPage(response) {
+  const body = Buffer.from(`<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <meta http-equiv="refresh" content="3">
+  <title>Claudesk 正在重新连接</title>
+  <style>
+    :root { color-scheme: light dark; font-family: system-ui, sans-serif; }
+    body { min-height: 100vh; margin: 0; display: grid; place-items: center; background: Canvas; color: CanvasText; }
+    main { width: min(32rem, calc(100% - 3rem)); text-align: center; }
+    h1 { font-size: 1.4rem; font-weight: 600; }
+    p { line-height: 1.6; opacity: .72; }
+    a { display: inline-block; margin-top: .5rem; padding: .65rem 1rem; border: 1px solid color-mix(in srgb, CanvasText 25%, transparent); border-radius: .65rem; color: inherit; text-decoration: none; }
+  </style>
+</head>
+<body>
+  <main>
+    <h1>正在重新连接 Claude Desktop</h1>
+    <p>修改 API 配置或重启服务后可能需要一小段时间。页面将在 3 秒后自动重试。</p>
+    <a href="/">立即重试</a>
+  </main>
+</body>
+</html>`, "utf8");
+  response.writeHead(503, {
+    "Cache-Control": "no-store",
+    "Content-Length": body.length,
+    "Content-Type": "text/html; charset=utf-8",
+    "Retry-After": "3",
+    "X-Content-Type-Options": "nosniff",
+  });
+  response.end(body);
+}
+
+function isDocumentNavigation(request) {
+  if (request.method !== "GET") return false;
+  if (request.headers["sec-fetch-dest"] === "document") return true;
+  return String(request.headers.accept || "").includes("text/html");
+}
+
 const realtime = createRealtimeController({ desktop, isChatSession, ApiError });
 const handleDownload = createDownloadHandler({
   ApiError,
   artifactsRoot,
   mimeTypes,
-  resolveWorkspacePath,
+  workspaceRoot,
 });
 
 async function readJson(request, maxSize = 1024 * 1024) {
@@ -724,20 +737,6 @@ async function readRequestBuffer(request, maxSize = 1024 * 1024) {
   return Buffer.concat(chunks);
 }
 
-function resolveWorkspacePath(value, { allowRoot = true } = {}) {
-  if (typeof value !== "string" || !value || value.length > 4096) {
-    throw new ApiError(400, "workspace path is invalid");
-  }
-  const filePath = resolve(value);
-  if (
-    (!allowRoot && filePath === workspaceRoot)
-    || (filePath !== workspaceRoot && !filePath.startsWith(`${workspaceRoot}/`))
-  ) {
-    throw new ApiError(403, "workspace path is outside the remote workspace");
-  }
-  return filePath;
-}
-
 function validateUploadRelativePath(value) {
   if (typeof value !== "string" || !value || value.length > 2048) {
     throw new ApiError(400, "upload relative path is invalid");
@@ -753,9 +752,6 @@ function validateUploadRelativePath(value) {
 }
 
 async function receiveBrowserUpload(request) {
-  if (!infrastructureActionsEnabled) {
-    throw new ApiError(404, "Remote infrastructure actions are disabled");
-  }
   const encoded = await readRequestBuffer(request, 72 * 1024 * 1024);
   let body;
   try {
@@ -929,25 +925,6 @@ function validateInvocation(surface, method, args) {
     throw new ApiError(400, "Desktop IPC method is not allowed");
   }
   if (!Array.isArray(args)) throw new ApiError(400, "args must be an array");
-  const infrastructureDestructive = infrastructureActionsEnabled
-    && infrastructureDestructiveMethods.has(`${surface}.${method}`);
-  const codeDestructive = codeActionsEnabled
-    && codeDestructiveMethods.has(`${surface}.${method}`);
-  const confirmedSessionDestructive = confirmedSessionDestructiveMethods.has(
-    `${surface}.${method}`,
-  );
-  if (
-    !allowDestructive
-    && !infrastructureDestructive
-    && !codeDestructive
-    && !confirmedSessionDestructive
-    && destructiveMethods.has(method)
-  ) {
-    throw new ApiError(
-      403,
-      `${method} is disabled; set COWORK_BRIDGE_ALLOW_DESTRUCTIVE=1 to enable it`,
-    );
-  }
 }
 
 function validateSettingsInvocation(surface, method, args) {
@@ -1262,17 +1239,11 @@ async function handleApi(request, response, url) {
         ),
         configuredModels,
         codeActionsEnabled,
-        destructiveMethodsEnabled: allowDestructive,
         infrastructureActionsEnabled,
       });
     } catch (error) {
       sendJson(response, 503, { ok: false, error: error.message });
     }
-    return;
-  }
-
-  if (request.method === "GET" && url.pathname === "/api/cowork/surfaces") {
-    sendJson(response, 200, { ok: true, surfaces: await desktop.inspect() });
     return;
   }
 
@@ -1407,14 +1378,6 @@ async function handleApi(request, response, url) {
       { title, titleSource: "manual" },
     ]);
     sendJson(response, 200, { ok: true, value: await getSession(sessionId) });
-    return;
-  }
-
-  if (request.method === "POST" && url.pathname === "/api/cowork/invoke") {
-    const body = await readJson(request);
-    validateInvocation(body.surface, body.method, body.args ?? []);
-    const value = await desktop.invoke(body.surface, body.method, body.args ?? []);
-    sendJson(response, 200, { ok: true, value });
     return;
   }
 
@@ -1640,7 +1603,11 @@ const server = http.createServer(async (request, response) => {
     }
   } catch (error) {
     const status = error.statusCode || (error.message === "not found" ? 404 : 500);
-    sendJson(response, status, { ok: false, error: error.message });
+    if (isDocumentNavigation(request) && status >= 500) {
+      sendDesktopReconnectPage(response);
+    } else {
+      sendJson(response, status, { ok: false, error: error.message });
+    }
   }
 });
 

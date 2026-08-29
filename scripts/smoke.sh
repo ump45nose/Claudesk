@@ -18,6 +18,13 @@ printf 'claude_version=%s\n' "$claude_version"
 docker exec "$container_name" sh -c \
     'printf "managed_settings="; stat -c "%u:%g %a %F" /etc/claude-desktop/managed-settings.json; printf "managed_settings_app_read="; su-exec app test -r /etc/claude-desktop/managed-settings.json && echo yes || echo no; printf "kvm="; test -r /dev/kvm -a -w /dev/kvm && echo rw || echo unavailable; printf "vhost_vsock="; test -r /dev/vhost-vsock -a -w /dev/vhost-vsock && echo rw || echo unavailable; printf "virtiofsd="; test -x /usr/bin/virtiofsd && /usr/bin/virtiofsd --version || echo unavailable'
 
+describe_status="$(docker exec "$container_name" curl -sS -o /dev/null -w '%{http_code}' \
+    http://127.0.0.1:9222/describe)"
+if [ "$describe_status" != "404" ]; then
+    printf 'internal describe endpoint returned %s\n' "$describe_status" >&2
+    exit 1
+fi
+
 curl -fsS --max-time 10 "http://127.0.0.1:${web_port}/" >/dev/null
 printf 'web=http://127.0.0.1:%s/ ok\n' "$web_port"
 

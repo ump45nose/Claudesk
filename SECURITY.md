@@ -22,7 +22,7 @@ Include the affected commit, enabled feature flags, the smallest reproducible re
 - Ports `15820` and `15821` have no built-in user authentication.
 - Direct ports must remain on a trusted LAN/Tailnet or be bound to loopback.
 - Internet access must pass through TLS and an authentication layer such as Authelia.
-- `CLAUDE_REMOTE_GATEWAY_SETTINGS`, `CLAUDE_REMOTE_DEVELOPER_ACTIONS`, `CLAUDE_REMOTE_INFRASTRUCTURE_ACTIONS`, `CLAUDE_REMOTE_CODE_ACTIONS`, and `COWORK_BRIDGE_ALLOW_DESTRUCTIVE` expand the remote attack surface and are disabled by default.
+- `CLAUDE_REMOTE_GATEWAY_SETTINGS`, `CLAUDE_REMOTE_DEVELOPER_ACTIONS`, `CLAUDE_REMOTE_INFRASTRUCTURE_ACTIONS`, and `CLAUDE_REMOTE_CODE_ACTIONS` expand the remote attack surface and are disabled by default.
 - The Gateway API Key should remain in the Desktop container and must never be embedded in browser code, screenshots, logs, or repository files.
 
 ## Out of scope

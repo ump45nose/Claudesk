@@ -45,10 +45,14 @@
           for (let offset = 0; offset < bytes.length; offset += 32768) {
             binary += String.fromCharCode(...bytes.subarray(offset, offset + 32768));
           }
-          const result = await bridgeRequest("/api/remote/crypto/digest", {
-            algorithm: name,
-            dataBase64: btoa(binary),
-          });
+          const result = await bridgeRequest(
+            "/api/remote/crypto/digest",
+            {
+              algorithm: name,
+              dataBase64: btoa(binary),
+            },
+            { retryable: true },
+          );
           return Uint8Array.from(
             atob(result.dataBase64),
             (character) => character.charCodeAt(0),
@@ -199,8 +203,9 @@
     return value;
   }
 
-  async function bridgeRequest(path, body, attempts = 2) {
+  async function bridgeRequest(path, body, { retryable = false } = {}) {
     let lastError = null;
+    const attempts = retryable ? 2 : 1;
     for (let attempt = 0; attempt < attempts; attempt += 1) {
       try {
         const response = await fetch(path, {
@@ -210,13 +215,21 @@
         });
         const payload = await response.json().catch(() => ({}));
         if (!response.ok || !payload.ok) {
-          throw new Error(payload.error || `Remote Desktop bridge returned HTTP ${response.status}`);
+          const error = new Error(
+            payload.error || `Remote Desktop bridge returned HTTP ${response.status}`,
+          );
+          error.bridgeRetryable = response.status === 408
+            || response.status === 429
+            || response.status >= 500;
+          throw error;
         }
         return payload.value;
       } catch (error) {
         lastError = error;
-        if (attempt + 1 < attempts) {
+        if (attempt + 1 < attempts && error?.bridgeRetryable !== false) {
           await new Promise((resolve) => setTimeout(resolve, 350 * (attempt + 1)));
+        } else {
+          break;
         }
       }
     }
@@ -299,7 +312,6 @@
         args: encodeIpcValue(args),
         argsEncoding: "json-undefined-v1",
       },
-      1,
     ).catch(() => {});
     return Promise.resolve({ restarting: true });
   }
@@ -348,7 +360,11 @@
 
   async function refreshStore(surface, store) {
     const key = `${surface}.${store}`;
-    const value = await bridgeRequest("/api/remote/store", { surface, store });
+    const value = await bridgeRequest(
+      "/api/remote/store",
+      { surface, store },
+      { retryable: true },
+    );
     const previous = storeState.get(key);
     storeState.set(key, value);
     if (JSON.stringify(previous) !== JSON.stringify(value)) {
@@ -433,7 +449,7 @@
         relativePath: file.webkitRelativePath || file.name,
       });
     }
-    return bridgeRequest("/api/remote/files/upload", { files: payload }, 1);
+    return bridgeRequest("/api/remote/files/upload", { files: payload });
   }
 
   async function browseBrowserFiles(directory) {

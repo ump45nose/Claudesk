@@ -2,15 +2,73 @@ import { createReadStream } from "node:fs";
 import { realpath, stat } from "node:fs/promises";
 import { basename, extname, resolve } from "node:path";
 
+export async function resolveContainedRealPath(
+  root,
+  target,
+  {
+    allowRoot = true,
+    missingMessage = "path was not found",
+    outsideMessage = "path is outside the allowed root",
+  } = {},
+) {
+  const lexicalRoot = resolve(root);
+  const lexicalTarget = resolve(target);
+  if (
+    lexicalTarget !== lexicalRoot
+    && !lexicalTarget.startsWith(`${lexicalRoot}/`)
+  ) {
+    const error = new Error(outsideMessage);
+    error.statusCode = 403;
+    throw error;
+  }
+
+  let canonicalRoot;
+  let canonicalTarget;
+  try {
+    [canonicalRoot, canonicalTarget] = await Promise.all([
+      realpath(lexicalRoot),
+      realpath(lexicalTarget),
+    ]);
+  } catch (error) {
+    if (error?.code === "ENOENT") {
+      const missingError = new Error(missingMessage);
+      missingError.statusCode = 404;
+      throw missingError;
+    }
+    throw error;
+  }
+
+  if (
+    (!allowRoot && canonicalTarget === canonicalRoot)
+    || (
+      canonicalTarget !== canonicalRoot
+      && !canonicalTarget.startsWith(`${canonicalRoot}/`)
+    )
+  ) {
+    const error = new Error(outsideMessage);
+    error.statusCode = 403;
+    throw error;
+  }
+  return canonicalTarget;
+}
+
 export function createDownloadHandler({
   ApiError,
   artifactsRoot,
   mimeTypes,
-  resolveWorkspacePath,
+  workspaceRoot,
 }) {
   return async function handleDownload(request, response, url) {
     if (request.method === "GET" && url.pathname === "/api/remote/files/download") {
-      const filePath = resolveWorkspacePath(url.searchParams.get("path"), { allowRoot: false });
+      const requestedPath = url.searchParams.get("path");
+      if (typeof requestedPath !== "string" || !requestedPath || requestedPath.length > 4096) {
+        throw new ApiError(400, "workspace path is invalid");
+      }
+      const filePath = await resolveContainedRealPath(workspaceRoot, requestedPath, {
+        allowRoot: false,
+        missingMessage: "workspace file was not found",
+        outsideMessage: "workspace path is outside the remote workspace",
+      });
       const info = await stat(filePath);
       if (!info.isFile()) throw new ApiError(404, "workspace file was not found");
       const originalName = basename(filePath);
@@ -39,20 +97,14 @@ export function createDownloadHandler({
       || /[\\/\u0000-\u001f]/.test(artifactId)
     ) throw new ApiError(400, "artifact id is invalid");
 
-    let canonicalRoot;
-    let canonicalIndex;
-    try {
-      [canonicalRoot, canonicalIndex] = await Promise.all([
-        realpath(artifactsRoot),
-        realpath(resolve(artifactsRoot, artifactId, "index.html")),
-      ]);
-    } catch (error) {
-      if (error?.code === "ENOENT") throw new ApiError(404, "artifact was not found");
-      throw error;
-    }
-    if (canonicalIndex !== canonicalRoot && !canonicalIndex.startsWith(`${canonicalRoot}/`)) {
-      throw new ApiError(403, "artifact path is outside the artifact store");
-    }
+    const canonicalIndex = await resolveContainedRealPath(
+      artifactsRoot,
+      resolve(artifactsRoot, artifactId, "index.html"),
+      {
+        missingMessage: "artifact was not found",
+        outsideMessage: "artifact path is outside the artifact store",
+      },
+    );
     const info = await stat(canonicalIndex);
     if (!info.isFile() || extname(canonicalIndex).toLowerCase() !== ".html") {
       throw new ApiError(404, "artifact HTML was not found");

@@ -135,7 +135,6 @@ docker compose down
 | `CLAUDE_REMOTE_DEVELOPER_ACTIONS` | `0` | MCP/Skill/Plugin 管理、日志/配置查看、调试与 trace/heap 下载等 allowlist 操作 |
 | `CLAUDE_REMOTE_INFRASTRUCTURE_ACTIONS` | `0` | Projects/Spaces、Artifacts、Memory、Scheduled Tasks 等官方 mutation IPC |
 | `CLAUDE_REMOTE_CODE_ACTIONS` | `0` | Code/LocalSessions、终端、权限、MCP 与 `/workspace` 文件操作 |
-| `COWORK_BRIDGE_ALLOW_DESTRUCTIVE` | `0` | 是否允许 Bridge 的 destructive 方法；建议保持关闭 |
 
 Code 命令只在 Desktop 容器内执行，默认工作根目录是挂载的 `/workspace`，不会在访问页面的手机或电脑上执行。即使启用高权限开关，Bridge 也不公开远程控制、SSH、云端 teleport、PR mutation 或自动 commit/stash/discard 等方法。
 
@@ -171,7 +170,7 @@ Code 命令只在 Desktop 容器内执行，默认工作根目录是挂载的 `/
 
 - 直接 `15821` 端口没有应用层认证，只应暴露在可信 LAN/Tailnet；公网访问请使用 Authelia 保护的 HTTPS 入口。
 - Gateway Key 默认只留在 Desktop 容器与受管配置中，不注入浏览器 bootstrap；跨边界的请求头仅允许 `accept`、`accept-language`、`content-type`。
-- destructive 方法、Developer、Infrastructure、Code 和 Gateway 编辑均采用独立显式开关，默认值为 `0`。
+- Developer、Infrastructure、Code 和 Gateway 编辑采用独立显式开关，默认值为 `0`；各能力内的删除操作由对应能力开关一并授权。
 - Bridge 拒绝任意文件路径、通用 Electron action、凭据字段和未 allowlist 的 IPC 方法；trace/heap 与配置文件走不缓存的受限端点。
 - 镜像使用 Anthropic 签名 APT 源、固定 digest 的 Rust builder、校验和固定的 `virtiofsd` 1.13.3，以及项目内的窄化 seccomp 规则；容器不使用 `--privileged`、`seccomp=unconfined` 或 `CAP_SYS_ADMIN`。
 - 静态 Gateway 模式使用 `--password-store=basic` 以避免 headless 启动卡在 Keyring 解锁；不要把它当作交互式登录凭据的加密持久化方案。

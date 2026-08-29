@@ -17,6 +17,7 @@ jq -e \
   '.ok == true
     and .chatReady == true
     and .runtimeControlReady == true
+    and (has("destructiveMethodsEnabled") | not)
     and .transport == "official-renderer-ipc"
     and .renderer.desktopVersion == $version
     and .renderer.patchRelease == $release
@@ -71,6 +72,8 @@ fi
 curl -fsS "$base_url/remote-preload.js?v=$release" > "$tmp_dir/remote-preload.js"
 curl -fsS "$base_url/service-worker.js?v=$release" > "$tmp_dir/service-worker.js"
 node --check "$tmp_dir/remote-preload.js"
+grep -F 'async function bridgeRequest(path, body, { retryable = false } = {})' \
+  "$tmp_dir/remote-preload.js" >/dev/null
 grep -F "const RELEASE = \"$release\"" "$tmp_dir/service-worker.js" >/dev/null
 # The Service Worker template expression is intentionally matched literally.
 # shellcheck disable=SC2016
@@ -94,6 +97,19 @@ if curl -fsS "$base_url/api/remote/files/reveal?path=%2Fworkspace" >/dev/null 2>
   printf '%s\n' 'chat smoke: removed directory reveal endpoint is still available' >&2
   exit 1
 fi
+
+for removed_spec in 'GET /api/cowork/surfaces' 'POST /api/cowork/invoke'; do
+  removed_method="${removed_spec%% *}"
+  removed_path="${removed_spec#* }"
+  removed_status="$(curl -sS -o /dev/null -w '%{http_code}' \
+    -X "$removed_method" -H 'Content-Type: application/json' -d '{}' \
+    "$base_url$removed_path")"
+  if [ "$removed_status" != "404" ]; then
+    printf 'chat smoke: removed endpoint %s returned %s\n' \
+      "$removed_path" "$removed_status" >&2
+    exit 1
+  fi
+done
 
 jq -n \
   --arg version "$desktop_version" \

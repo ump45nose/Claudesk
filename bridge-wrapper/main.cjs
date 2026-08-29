@@ -926,7 +926,8 @@ async function readJson(request, maxSize = 1024 * 1024) {
 
 function validateInvocation(surface, method, args) {
   if (!allowedSurfaces.has(surface)) throw new Error("Cowork surface is not allowed");
-  if (!allowedMethods.get(surface).has(method)) {
+  if (!/^[A-Za-z][A-Za-z0-9]*$/.test(method)) throw new Error("invalid method name");
+  if (!allowedMethods.get(surface)?.has(method)) {
     throw new Error("Cowork IPC method is not allowed");
   }
   if (!Array.isArray(args)) throw new Error("args must be an array");
@@ -1303,35 +1304,6 @@ async function inspect() {
             (key) => allowed[name]?.includes(key) && typeof api[key] === "function",
           ),
         ]),
-    ));
-  })()`;
-  const serialized = await evaluateInOfficialRenderer(expression);
-  return JSON.parse(serialized);
-}
-
-async function describe() {
-  const expression = `(() => {
-    const root = globalThis["claude.web"];
-    if (!root?.LocalAgentModeSessions) return "__COWORK_BRIDGE_NOT_AVAILABLE__";
-    const describeValue = (value) => {
-      if (value === null) return { type: "null" };
-      const type = typeof value;
-      if (type !== "object") return { type };
-      const keys = {};
-      for (const key of Object.keys(value)) {
-        try {
-          keys[key] = typeof value[key];
-        } catch {
-          keys[key] = "unreadable";
-        }
-      }
-      return { type, keys };
-    };
-    return JSON.stringify(Object.fromEntries(
-      Object.entries(root).map(([surface, api]) => [
-        surface,
-        Object.fromEntries(Object.keys(api).map((key) => [key, describeValue(api[key])])),
-      ]),
     ));
   })()`;
   const serialized = await evaluateInOfficialRenderer(expression);
@@ -1763,10 +1735,6 @@ const server = http.createServer(async (request, response) => {
         renderer: rendererManifest,
         surfaces,
       });
-      return;
-    }
-    if (request.method === "GET" && url.pathname === "/describe") {
-      sendJson(response, 200, { ok: true, value: await describe() });
       return;
     }
     if (request.method === "GET" && url.pathname === "/boot-features") {
